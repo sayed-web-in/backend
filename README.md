@@ -27,6 +27,13 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Environment variables
+
+1. Copy `.env.example` to `.env`.
+2. Set `DATABASE_URL` (Prisma / MySQL) and adjust `PORT` / `CORS_ORIGIN` if needed.
+
+The real `.env` file is **not** committed (secrets stay local / on the server).
+
 ## Project setup
 
 ```bash
