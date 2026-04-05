@@ -29,10 +29,9 @@
 
 ## Environment variables
 
-1. Copy `.env.example` to `.env`.
-2. Set `DATABASE_URL` (Prisma / MySQL) and adjust `PORT` / `CORS_ORIGIN` if needed.
+This repo includes a committed `.env` for a **private** setup. Clone/pull teammates should get working defaults; if the repo ever becomes public, **rotate all secrets** and stop tracking `.env`.
 
-The real `.env` file is **not** committed (secrets stay local / on the server).
+You can still copy from `.env.example` when bootstrapping a fresh machine without pulling `.env`.
 
 ## Project setup
 

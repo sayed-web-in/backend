@@ -1,5 +1,4 @@
 node_modules
 dist
 coverage
-# Keep environment variables out of version control
-.env
+# .env is tracked (private repo); rotate secrets if the repo is ever made public
