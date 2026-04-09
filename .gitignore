@@ -1,4 +1,3 @@
 node_modules
 dist
 coverage
-# .env is tracked (private repo); rotate secrets if the repo is ever made public

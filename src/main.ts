@@ -1,19 +1,21 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
+import { AppModule } from './app.module.js';
+import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  const corsOrigins =
-    process.env.CORS_ORIGIN?.split(',').map((o) => o.trim()).filter(Boolean) ??
-    [];
-  app.enableCors({
-    origin: corsOrigins.length > 0 ? corsOrigins : true,
-    credentials: true,
-  });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useStaticAssets(join(__dirname, '..', 'uploads'), { prefix: '/uploads/' });
+
+  const corsOrigins = process.env.CORS_ORIGIN?.split(',').map((o) => o.trim()).filter(Boolean) ?? [];
+  app.enableCors({ origin: corsOrigins.length > 0 ? corsOrigins : true, credentials: true });
+
   const port = Number(process.env.PORT) || 4000;
   await app.listen(port);
-  const msg = `Server listening on http://localhost:${port}`;
-  console.log(`\x1b[37m${msg}\x1b[0m`);
+  console.log(`Server listening on http://localhost:${port}`);
 }
 bootstrap();
