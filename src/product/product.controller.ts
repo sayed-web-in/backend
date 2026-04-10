@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -13,6 +14,7 @@ import { ProductService } from './product.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AddToStoreDto } from './dto/add-to-store.dto.js';
+import { UpdateStoreProductDto } from './dto/update-store-product.dto.js';
 import { ProductQueryDto, StoreProductQueryDto } from './dto/product-query.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { PaginationDto } from '../common/pagination.dto.js';
@@ -45,6 +47,34 @@ export class ProductController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('store/:id/batches')
+  async getBatches(@Param('id', ParseIntPipe) id: number) {
+    const batches = await this.productService.getBatches(id);
+    return { batches };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('store-products/:storeProductId')
+  updateStoreProduct(
+    @Param('storeProductId', ParseIntPipe) storeProductId: number,
+    @Body() dto: UpdateStoreProductDto,
+  ) {
+    return this.productService.updateStoreProduct(storeProductId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('store-products/:storeProductId')
+  deleteStoreProduct(@Param('storeProductId', ParseIntPipe) storeProductId: number) {
+    return this.productService.deleteStoreProduct(storeProductId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('batches/:batchId')
+  getBatchById(@Param('batchId', ParseIntPipe) batchId: number) {
+    return this.productService.getBatchById(batchId);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('draft')
   getDraftProducts(@Query() query: PaginationDto) {
     return this.productService.getDraftProducts(query);
@@ -66,14 +96,20 @@ export class ProductController {
     return this.productService.search(q, categoryId ? Number(categoryId) : undefined);
   }
 
-  @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.productService.findOne(id);
-  }
-
   @Get('slug/:slug')
   findBySlug(@Param('slug') slug: string) {
     return this.productService.findBySlug(slug);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/branch-variants')
+  getBranchVariants(@Param('id', ParseIntPipe) id: number) {
+    return this.productService.getBranchVariants(id);
+  }
+
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.productService.findOne(id);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -92,11 +128,5 @@ export class ProductController {
   @Post(':id/restore')
   restore(@Param('id', ParseIntPipe) id: number) {
     return this.productService.restore(id);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('store/:id/batches')
-  getBatches(@Param('id', ParseIntPipe) id: number) {
-    return this.productService.getBatches(id);
   }
 }

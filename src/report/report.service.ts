@@ -735,7 +735,15 @@ export class ReportService {
     const operatingIncome = grossProfit - operatingExpenses + otherIncome;
     const netProfit = operatingIncome;
 
-    let previousPeriod = null;
+    type PreviousPeriodSummary = {
+      revenue: number;
+      cogs: number;
+      grossProfit: number;
+      operatingExpenses: number;
+      otherIncome: number;
+      netProfit: number;
+    };
+    let previousPeriod: PreviousPeriodSummary | null = null;
     const prevRange = this.previousPeriodRange(query);
     if (prevRange) {
       const [prevSales, prevPurchases, prevExpenses, prevIncomes] = await Promise.all([
@@ -774,6 +782,8 @@ export class ReportService {
       };
     }
 
+    const prevSummary = previousPeriod;
+
     return {
       currentPeriod: {
         revenue,
@@ -784,16 +794,16 @@ export class ReportService {
         operatingIncome,
         netProfit,
       },
-      previousPeriod,
-      change: previousPeriod
+      previousPeriod: prevSummary,
+      change: prevSummary
         ? {
-            revenueChange: revenue - previousPeriod.revenue,
-            revenueChangePercent: previousPeriod.revenue
-              ? ((revenue - previousPeriod.revenue) / previousPeriod.revenue) * 100
+            revenueChange: revenue - prevSummary.revenue,
+            revenueChangePercent: prevSummary.revenue
+              ? ((revenue - prevSummary.revenue) / prevSummary.revenue) * 100
               : null,
-            netProfitChange: netProfit - previousPeriod.netProfit,
-            netProfitChangePercent: previousPeriod.netProfit
-              ? ((netProfit - previousPeriod.netProfit) / previousPeriod.netProfit) * 100
+            netProfitChange: netProfit - prevSummary.netProfit,
+            netProfitChangePercent: prevSummary.netProfit
+              ? ((netProfit - prevSummary.netProfit) / prevSummary.netProfit) * 100
               : null,
           }
         : null,

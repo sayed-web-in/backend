@@ -29,6 +29,16 @@ export class SpecificationDto {
 }
 
 export class ProductVariantDto {
+  /** When set, updates this variant (DRAFT + VARIABLE products only). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  id?: number;
+
+  @IsOptional()
+  @IsString()
+  sku?: string;
+
   @IsOptional()
   @IsString()
   image?: string;

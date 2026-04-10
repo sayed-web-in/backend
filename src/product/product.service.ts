@@ -7,9 +7,10 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AddToStoreDto } from './dto/add-to-store.dto.js';
+import { UpdateStoreProductDto } from './dto/update-store-product.dto.js';
 import { ProductQueryDto, StoreProductQueryDto } from './dto/product-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
-import { ProductType } from '@prisma/client';
+import { Prisma, ProductType, ProductStatus } from '@prisma/client';
 
 @Injectable()
 export class ProductService {
@@ -28,12 +29,6 @@ export class ProductService {
     const ts = Date.now().toString(36).toUpperCase();
     const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
     return `${prefix}-${ts}-${rand}`;
-  }
-
-  private generateBatchNumber(): string {
-    const ts = Date.now();
-    const rand = Math.floor(1000 + Math.random() * 9000);
-    return `BATCH-${ts}-${rand}`;
   }
 
   private generateBarcode(): string {
@@ -67,7 +62,7 @@ export class ProductService {
           data.type === ProductType.VARIABLE && variants?.length
             ? {
                 create: variants.map((v) => ({
-                  sku: this.generateSku('VAR'),
+                  sku: v.sku?.trim() || this.generateSku('VAR'),
                   image: v.image,
                   attributes: {
                     create: v.attributeValueIds.map((avId) => ({
@@ -97,7 +92,11 @@ export class ProductService {
     });
     if (!product) throw new NotFoundException('Product not found');
 
-    if (product.hasImei && (!dto.serialNumbers || dto.serialNumbers.length !== dto.quantity)) {
+    if (
+      product.hasImei &&
+      dto.quantity > 0 &&
+      (!dto.serialNumbers || dto.serialNumbers.length !== dto.quantity)
+    ) {
       throw new BadRequestException(
         'Serial numbers count must match quantity for IMEI-tracked products',
       );
@@ -120,15 +119,21 @@ export class ProductService {
         },
       });
 
-      const batchNumber = this.generateBatchNumber();
+      /** Readable, unique id; includes INITIAL so add-product → add store listings are obvious in batch list. */
+      const batchNumber = `BATCH-INITIAL-SP${storeProduct.id}-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const barcode = this.generateBarcode();
+      const now = new Date();
 
       const batch = await tx.batch.create({
         data: {
           batchNumber,
           barcode,
+          batchType: 'initial',
+          batchDate: now,
           initialQty: dto.quantity,
           availableQty: dto.quantity,
+          soldQty: 0,
+          returnQty: 0,
           purchaseCost: dto.purchaseCost,
           totalCost: dto.purchaseCost * dto.quantity,
           supplierId: dto.supplierId,
@@ -243,7 +248,9 @@ export class ProductService {
     const product = await this.prisma.product.findUnique({
       where: { id },
       include: {
-        category: true,
+        category: {
+          include: { branches: { include: { branch: true } } },
+        },
         subCategory: true,
         brand: true,
         unit: true,
@@ -307,7 +314,9 @@ export class ProductService {
   }
 
   async update(id: number, dto: UpdateProductDto) {
-    await this.findOne(id);
+    const product = await this.prisma.product.findUnique({ where: { id } });
+    if (!product) throw new NotFoundException('Product not found');
+
     const { images, specifications, variants, ...data } = dto as CreateProductDto;
 
     if (images) {
@@ -317,7 +326,7 @@ export class ProductService {
       await this.prisma.specification.deleteMany({ where: { productId: id } });
     }
 
-    return this.prisma.product.update({
+    await this.prisma.product.update({
       where: { id },
       data: {
         ...data,
@@ -328,21 +337,273 @@ export class ProductService {
           ? { create: specifications.map((s) => ({ name: s.name, value: s.value })) }
           : undefined,
       },
+    });
+
+    if (
+      variants !== undefined &&
+      product.status === ProductStatus.DRAFT &&
+      product.type === ProductType.VARIABLE
+    ) {
+      await this.reconcileDraftVariants(id, variants);
+    }
+
+    return this.findOne(id);
+  }
+
+  /**
+   * Sync variants for a DRAFT variable product: update by id, create without id, delete orphans with no store rows.
+   */
+  private async reconcileDraftVariants(
+    productId: number,
+    variants: NonNullable<CreateProductDto['variants']>,
+  ) {
+    const existing = await this.prisma.productVariant.findMany({
+      where: { productId },
+      select: {
+        id: true,
+        _count: { select: { storeProducts: true } },
+      },
+    });
+
+    const incomingWithId = new Set(
+      variants.filter((v) => v.id != null).map((v) => v.id as number),
+    );
+
+    for (const ex of existing) {
+      if (!incomingWithId.has(ex.id) && ex._count.storeProducts === 0) {
+        await this.prisma.productVariant.delete({ where: { id: ex.id } });
+      }
+    }
+
+    for (const v of variants) {
+      if (!v.attributeValueIds?.length) {
+        throw new BadRequestException('Each variant must include at least one attribute value');
+      }
+
+      if (v.id != null) {
+        const row = await this.prisma.productVariant.findFirst({
+          where: { id: v.id, productId },
+        });
+        if (!row) {
+          throw new BadRequestException(`Variant ${v.id} does not belong to this product`);
+        }
+
+        const variantUpdate: Prisma.ProductVariantUpdateInput = {
+          attributes: {
+            deleteMany: {},
+            create: v.attributeValueIds.map((attributeValueId) => ({ attributeValueId })),
+          },
+        };
+        if (v.image !== undefined) variantUpdate.image = v.image;
+        if (v.sku?.trim()) variantUpdate.sku = v.sku.trim();
+
+        await this.prisma.productVariant.update({
+          where: { id: v.id },
+          data: variantUpdate,
+        });
+      } else {
+        await this.prisma.productVariant.create({
+          data: {
+            productId,
+            sku: v.sku?.trim() || this.generateSku('VAR'),
+            image: v.image,
+            attributes: {
+              create: v.attributeValueIds.map((attributeValueId) => ({ attributeValueId })),
+            },
+          },
+        });
+      }
+    }
+  }
+
+  async updateStoreProduct(storeProductId: number, dto: UpdateStoreProductDto) {
+    const sp = await this.prisma.storeProduct.findUnique({
+      where: { id: storeProductId },
+      include: { batches: true },
+    });
+    if (!sp) throw new NotFoundException('Store product not found');
+
+    const updateData: Prisma.StoreProductUpdateInput = {};
+    if (dto.sellingPrice !== undefined) updateData.sellingPrice = dto.sellingPrice;
+    if (dto.discountType !== undefined) updateData.discountType = dto.discountType;
+    if (dto.discountValue !== undefined) updateData.discountValue = dto.discountValue;
+    if (dto.quantityAlert !== undefined) updateData.quantityAlert = dto.quantityAlert;
+    if (dto.sellingType !== undefined) updateData.sellingType = dto.sellingType;
+    if (dto.isBestDeal !== undefined) updateData.isBestDeal = dto.isBestDeal;
+    if (dto.isFeatured !== undefined) updateData.isFeatured = dto.isFeatured;
+
+    if (dto.purchaseCostPerUnit !== undefined) {
+      if (sp.batches.length !== 1) {
+        throw new BadRequestException(
+          'Purchase cost can only be edited when this listing has exactly one batch',
+        );
+      }
+      const batch = sp.batches[0];
+      if (batch.soldQty > 0) {
+        throw new BadRequestException(
+          'Cannot change purchase cost after items from this batch have been sold',
+        );
+      }
+      const unit = dto.purchaseCostPerUnit;
+      const totalCost = unit * batch.initialQty;
+      await this.prisma.batch.update({
+        where: { id: batch.id },
+        data: {
+          purchaseCost: unit,
+          totalCost,
+        },
+      });
+    }
+
+    return this.prisma.storeProduct.update({
+      where: { id: storeProductId },
+      data: updateData,
       include: {
-        category: true,
-        subCategory: true,
-        brand: true,
-        unit: true,
-        taxRate: true,
-        images: { orderBy: { sortOrder: 'asc' } },
-        specifications: true,
-        variants: {
+        branch: true,
+        productVariant: {
           include: {
-            attributes: { include: { attributeValue: true } },
+            attributes: { include: { attributeValue: { include: { attribute: true } } } },
+          },
+        },
+        batches: { include: { serialNumbers: true } },
+      },
+    });
+  }
+
+  async deleteStoreProduct(storeProductId: number) {
+    const sp = await this.prisma.storeProduct.findUnique({
+      where: { id: storeProductId },
+      include: {
+        batches: true,
+        _count: {
+          select: {
+            saleItems: true,
+            purchaseItems: true,
+            orderItems: true,
           },
         },
       },
     });
+    if (!sp) throw new NotFoundException('Store product not found');
+
+    if (sp._count.saleItems > 0 || sp._count.purchaseItems > 0 || sp._count.orderItems > 0) {
+      throw new BadRequestException(
+        'Cannot delete this store listing: it is linked to sales, purchases, or orders',
+      );
+    }
+
+    if (sp.quantity > 0) {
+      throw new BadRequestException(
+        'Cannot delete while stock quantity is greater than zero; adjust stock first',
+      );
+    }
+
+    if (sp.batches.some((b) => b.soldQty > 0)) {
+      throw new BadRequestException('Cannot delete: a batch has recorded sales');
+    }
+
+    const [adjCount, xferCount] = await Promise.all([
+      this.prisma.stockAdjustmentItem.count({ where: { storeProductId } }),
+      this.prisma.stockTransferItem.count({ where: { storeProductId } }),
+    ]);
+    if (adjCount > 0 || xferCount > 0) {
+      throw new BadRequestException(
+        'Cannot delete: this listing is referenced by stock adjustments or transfers',
+      );
+    }
+
+    await this.prisma.storeProduct.delete({ where: { id: storeProductId } });
+    return { ok: true };
+  }
+
+  async getBranchVariants(productId: number) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: {
+        storeProducts: {
+          where: { isActive: true },
+          include: {
+            branch: true,
+            productVariant: {
+              include: {
+                attributes: {
+                  include: {
+                    attributeValue: { include: { attribute: true } },
+                  },
+                },
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+
+    const variants = product.storeProducts.map((sp) => {
+      const attrs = sp.productVariant?.attributes ?? [];
+      const variantLabel =
+        attrs.length > 0
+          ? attrs
+              .map((a) => `${a.attributeValue.attribute.name}: ${a.attributeValue.value}`)
+              .join(', ')
+          : product.type === ProductType.SINGLE
+            ? 'Default'
+            : undefined;
+
+      return {
+        id: sp.id,
+        branchName: sp.branch.name,
+        image: sp.productVariant?.image ?? undefined,
+        variantLabel,
+        quantity: sp.quantity,
+        sellingPrice: Number(sp.sellingPrice),
+        date: sp.createdAt.toISOString(),
+        quantityAlert: sp.quantityAlert,
+      };
+    });
+
+    return { variants };
+  }
+
+  async getBatchById(batchId: number) {
+    const batch = await this.prisma.batch.findUnique({
+      where: { id: batchId },
+      include: {
+        serialNumbers: true,
+        supplier: true,
+      },
+    });
+    if (!batch) throw new NotFoundException('Batch not found');
+
+    return {
+      batch: {
+        id: batch.id,
+        batchNumber: batch.batchNumber,
+        barcode: batch.barcode ?? '',
+        type: batch.batchType,
+        initialQty: batch.initialQty,
+        availableQty: batch.availableQty,
+        soldQty: batch.soldQty,
+        returnQty: batch.returnQty,
+        purchaseCost: Number(batch.purchaseCost),
+        totalCost: Number(batch.totalCost),
+        batchDate: batch.batchDate.toISOString(),
+        supplier: batch.supplier
+          ? {
+              name: batch.supplier.name,
+              phone: batch.supplier.phone ?? undefined,
+              email: batch.supplier.email ?? undefined,
+            }
+          : undefined,
+        serialNumbers: batch.serialNumbers.map((s) => ({
+          id: s.id,
+          serial: s.serial,
+          status: s.status,
+          createdAt: s.createdAt.toISOString(),
+        })),
+      },
+    };
   }
 
   async archive(id: number) {
