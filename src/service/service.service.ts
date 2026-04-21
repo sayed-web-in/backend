@@ -2,19 +2,23 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateServiceDto } from './dto/create-service.dto.js';
 import { UpdateServiceDto } from './dto/update-service.dto.js';
-import { PaginationDto, paginate } from '../common/pagination.dto.js';
+import { paginate } from '../common/pagination.dto.js';
+import type { ServiceQueryDto } from './dto/service-query.dto.js';
 
 @Injectable()
 export class ServiceService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(query: PaginationDto) {
-    const { page = 1, limit = 16, search } = query;
+  async findAll(query: ServiceQueryDto) {
+    const { page = 1, limit = 16, search, isActive } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (search) {
       where.name = { contains: search };
+    }
+    if (typeof isActive === 'boolean') {
+      where.isActive = isActive;
     }
 
     const [data, total] = await Promise.all([

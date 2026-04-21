@@ -15,9 +15,12 @@ import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AddToStoreDto } from './dto/add-to-store.dto.js';
 import { UpdateStoreProductDto } from './dto/update-store-product.dto.js';
-import { ProductQueryDto, StoreProductQueryDto } from './dto/product-query.dto.js';
+import {
+  ProductQueryDto,
+  StoreProductQueryDto,
+  DraftProductQueryDto,
+} from './dto/product-query.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
-import { PaginationDto } from '../common/pagination.dto.js';
 
 @Controller('products')
 export class ProductController {
@@ -76,7 +79,7 @@ export class ProductController {
 
   @UseGuards(JwtAuthGuard)
   @Get('draft')
-  getDraftProducts(@Query() query: PaginationDto) {
+  getDraftProducts(@Query() query: DraftProductQueryDto) {
     return this.productService.getDraftProducts(query);
   }
 

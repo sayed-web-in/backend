@@ -13,8 +13,9 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
+import { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
+import { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
-import { PaginationDto } from '../common/pagination.dto.js';
 
 @Controller('sales')
 @UseGuards(JwtAuthGuard)
@@ -26,13 +27,29 @@ export class SaleController {
     return this.saleService.createSale(dto);
   }
 
-  @Get()
-  findAll(@Query() query: SaleQueryDto) {
-    return this.saleService.findAll(query);
+  /** Aggregates for overview cards (same filters as list, not paginated). */
+  @Get('summary')
+  getSaleSummary(@Query() query: SaleQueryDto) {
+    return this.saleService.getSaleListSummary(query);
+  }
+
+  @Get('returns/summary')
+  getReturnsSummary(@Query() query: SaleReturnQueryDto) {
+    return this.saleService.getSaleReturnSummary(query);
+  }
+
+  @Get('returns')
+  findReturns(@Query() query: SaleReturnQueryDto) {
+    return this.saleService.findReturns(query);
+  }
+
+  @Get('pay-later/stats')
+  getPayLaterStats(@Query() query: PayLaterQueryDto) {
+    return this.saleService.getPayLaterStats(query);
   }
 
   @Get('pay-later')
-  getPayLaterSales(@Query() query: PaginationDto) {
+  getPayLaterSales(@Query() query: PayLaterQueryDto) {
     return this.saleService.getPayLaterSales(query);
   }
 
@@ -41,9 +58,20 @@ export class SaleController {
     return this.saleService.searchBySerial(serial);
   }
 
+  @Get()
+  findAll(@Query() query: SaleQueryDto) {
+    return this.saleService.findAll(query);
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.saleService.findOne(id);
+  }
+
+  /** Static path before `:id/complete` so Nest never mis-matches `return`. */
+  @Post('return')
+  createReturn(@Body() dto: CreateSaleReturnDto) {
+    return this.saleService.createReturn(dto);
   }
 
   @Post(':id/complete')
@@ -52,10 +80,5 @@ export class SaleController {
     @Body() dto: CompletePaylaterDto,
   ) {
     return this.saleService.completePaylater(id, dto);
-  }
-
-  @Post('return')
-  createReturn(@Body() dto: CreateSaleReturnDto) {
-    return this.saleService.createReturn(dto);
   }
 }

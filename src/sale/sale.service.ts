@@ -8,6 +8,8 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
+import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
+import type { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
 
@@ -204,33 +206,64 @@ export class SaleService {
     });
   }
 
-  async findAll(query: SaleQueryDto) {
-    const {
-      page = 1,
-      limit = 16,
-      search,
-      branchId,
-      customerId,
-      status,
-      dateFrom,
-      dateTo,
-      sort,
-      order = 'desc',
-    } = query;
-    const skip = (page - 1) * limit;
-
+  private saleWhereFromDto(
+    query: Pick<
+      SaleQueryDto,
+      'branchId' | 'customerId' | 'status' | 'search' | 'dateFrom' | 'dateTo'
+    >,
+  ): any {
+    const { branchId, customerId, status, search, dateFrom, dateTo } = query;
     const where: any = {};
     if (branchId) where.branchId = branchId;
     if (customerId) where.customerId = customerId;
     if (status) where.status = status;
     if (search) {
-      where.invoiceNumber = { contains: search };
+      where.OR = [
+        { invoiceNumber: { contains: search } },
+        { customer: { name: { contains: search } } },
+        { customer: { phone: { contains: search } } },
+      ];
     }
     if (dateFrom || dateTo) {
       where.createdAt = {};
       if (dateFrom) where.createdAt.gte = new Date(dateFrom);
       if (dateTo) where.createdAt.lte = new Date(dateTo);
     }
+    return where;
+  }
+
+  private saleReturnWhereFromDto(
+    query: Pick<SaleReturnQueryDto, 'branchId' | 'search' | 'dateFrom' | 'dateTo'>,
+  ): any {
+    const { branchId, search, dateFrom, dateTo } = query;
+    const parts: any[] = [];
+    if (branchId) {
+      parts.push({ sale: { branchId } });
+    }
+    if (search) {
+      parts.push({
+        OR: [
+          { reason: { contains: search } },
+          { sale: { invoiceNumber: { contains: search } } },
+        ],
+      });
+    }
+    if (dateFrom || dateTo) {
+      const range: any = {};
+      if (dateFrom) range.gte = new Date(dateFrom);
+      if (dateTo) range.lte = new Date(dateTo);
+      parts.push({ createdAt: range });
+    }
+    if (parts.length === 0) return {};
+    if (parts.length === 1) return parts[0];
+    return { AND: parts };
+  }
+
+  async findAll(query: SaleQueryDto) {
+    const { page = 1, limit = 16, sort, order = 'desc' } = query;
+    const skip = (page - 1) * limit;
+
+    const where = this.saleWhereFromDto(query);
 
     const orderBy: any = {};
     if (sort) {
@@ -255,6 +288,88 @@ export class SaleService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getSaleListSummary(query: SaleQueryDto) {
+    const where = this.saleWhereFromDto(query);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const todayWhere = { AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }] };
+
+    const [total, sumAll, todayCount, todaySum] = await Promise.all([
+      this.prisma.sale.count({ where }),
+      this.prisma.sale.aggregate({
+        where,
+        _sum: { grandTotal: true },
+      }),
+      this.prisma.sale.count({ where: todayWhere }),
+      this.prisma.sale.aggregate({
+        where: todayWhere,
+        _sum: { grandTotal: true },
+      }),
+    ]);
+
+    return {
+      total,
+      totalRevenue: Number(sumAll._sum.grandTotal ?? 0),
+      todaySales: todayCount,
+      todayRevenue: Number(todaySum._sum.grandTotal ?? 0),
+    };
+  }
+
+  async findReturns(query: SaleReturnQueryDto) {
+    const { page = 1, limit = 16 } = query;
+    const skip = (page - 1) * limit;
+    const where = this.saleReturnWhereFromDto(query);
+
+    const [data, total] = await Promise.all([
+      this.prisma.saleReturn.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          sale: {
+            select: {
+              id: true,
+              invoiceNumber: true,
+              customer: true,
+              branch: true,
+            },
+          },
+          items: true,
+        },
+      }),
+      this.prisma.saleReturn.count({ where }),
+    ]);
+
+    return paginate(data, total, page, limit);
+  }
+
+  async getSaleReturnSummary(query: SaleReturnQueryDto) {
+    const where = this.saleReturnWhereFromDto(query);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const todayWhere = { AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }] };
+
+    const [total, sumAgg, todayCount] = await Promise.all([
+      this.prisma.saleReturn.count({ where }),
+      this.prisma.saleReturn.aggregate({
+        where,
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.saleReturn.count({ where: todayWhere }),
+    ]);
+
+    return {
+      total,
+      totalReturnAmount: Number(sumAgg._sum.totalAmount ?? 0),
+      todayReturns: todayCount,
+    };
   }
 
   async findOne(id: number) {
@@ -288,13 +403,42 @@ export class SaleService {
     return sale;
   }
 
-  async getPayLaterSales(query: PaginationDto) {
-    const { page = 1, limit = 16, search } = query;
+  async getPayLaterStats(query: PayLaterQueryDto) {
+    const { branchId, search } = query;
+    const where: any = { status: 'PAY_LATER' as const };
+    if (branchId) where.branchId = branchId;
+    if (search) {
+      where.OR = [
+        { invoiceNumber: { contains: search } },
+        { customer: { name: { contains: search } } },
+        { customer: { phone: { contains: search } } },
+      ];
+    }
+    const [total, sum] = await Promise.all([
+      this.prisma.sale.count({ where }),
+      this.prisma.sale.aggregate({
+        where,
+        _sum: { dueAmount: true },
+      }),
+    ]);
+    return {
+      total,
+      totalDueAmount: Number(sum._sum.dueAmount ?? 0),
+    };
+  }
+
+  async getPayLaterSales(query: PayLaterQueryDto) {
+    const { page = 1, limit = 16, search, branchId } = query;
     const skip = (page - 1) * limit;
 
     const where: any = { status: 'PAY_LATER' as const };
+    if (branchId) where.branchId = branchId;
     if (search) {
-      where.invoiceNumber = { contains: search };
+      where.OR = [
+        { invoiceNumber: { contains: search } },
+        { customer: { name: { contains: search } } },
+        { customer: { phone: { contains: search } } },
+      ];
     }
 
     const [data, total] = await Promise.all([

@@ -8,7 +8,11 @@ import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AddToStoreDto } from './dto/add-to-store.dto.js';
 import { UpdateStoreProductDto } from './dto/update-store-product.dto.js';
-import { ProductQueryDto, StoreProductQueryDto } from './dto/product-query.dto.js';
+import {
+  ProductQueryDto,
+  StoreProductQueryDto,
+  DraftProductQueryDto,
+} from './dto/product-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
 import { Prisma, ProductType, ProductStatus } from '@prisma/client';
 
@@ -624,18 +628,24 @@ export class ProductService {
   }
 
   async getStoreProducts(query: StoreProductQueryDto) {
-    const { page = 1, limit = 16, search, branchId } = query;
+    const { page = 1, limit = 16, search, branchId, brandId, categoryId, isActive } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (branchId) where.branchId = branchId;
+    if (typeof isActive === 'boolean') where.isActive = isActive;
+
+    const productWhere: any = {};
+    if (brandId) productWhere.brandId = brandId;
+    if (categoryId) productWhere.categoryId = categoryId;
     if (search) {
-      where.product = {
-        OR: [
-          { name: { contains: search } },
-          { sku: { contains: search } },
-        ],
-      };
+      productWhere.OR = [
+        { name: { contains: search } },
+        { sku: { contains: search } },
+      ];
+    }
+    if (Object.keys(productWhere).length) {
+      where.product = productWhere;
     }
 
     const [data, total] = await Promise.all([
@@ -645,7 +655,13 @@ export class ProductService {
         take: limit,
         orderBy: { createdAt: 'desc' },
         include: {
-          product: { include: { images: { take: 1, orderBy: { sortOrder: 'asc' } } } },
+          product: {
+            include: {
+              images: { take: 1, orderBy: { sortOrder: 'asc' } },
+              brand: true,
+              category: true,
+            },
+          },
           productVariant: {
             include: {
               attributes: { include: { attributeValue: true } },
@@ -661,15 +677,25 @@ export class ProductService {
     return paginate(data, total, page, limit);
   }
 
-  async getDraftProducts(query: PaginationDto) {
-    const { page = 1, limit = 16, search } = query;
+  async getDraftProducts(query: DraftProductQueryDto) {
+    const { page = 1, limit = 16, search, brandId, categoryId, status } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = { status: 'DRAFT', isArchived: false };
+    const where: any = { isArchived: false };
+    const hasOtherFilters = !!(brandId || categoryId || search);
+    if (status) {
+      where.status = status;
+    } else if (!hasOtherFilters) {
+      where.status = 'DRAFT';
+    }
+    if (brandId) where.brandId = brandId;
+    if (categoryId) where.categoryId = categoryId;
     if (search) {
-      where.OR = [
-        { name: { contains: search } },
-        { sku: { contains: search } },
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        {
+          OR: [{ name: { contains: search } }, { sku: { contains: search } }],
+        },
       ];
     }
 
@@ -692,22 +718,42 @@ export class ProductService {
   }
 
   async getLowStock(query: StoreProductQueryDto) {
-    const { page = 1, limit = 16, branchId } = query;
+    const { page = 1, limit = 100, branchId, search, level } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (branchId) where.branchId = branchId;
+    if (search) {
+      where.product = {
+        name: { contains: search },
+      };
+    }
 
-    const allLow = await this.prisma.storeProduct.findMany({
+    const rows = await this.prisma.storeProduct.findMany({
       where,
+      orderBy: [{ quantity: 'asc' }, { id: 'desc' }],
       include: {
-        product: { include: { images: { take: 1, orderBy: { sortOrder: 'asc' } } } },
+        product: {
+          include: {
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+            taxRate: true,
+          },
+        },
         branch: true,
-        productVariant: true,
+        productVariant: {
+          include: {
+            attributes: { include: { attributeValue: true } },
+          },
+        },
       },
     });
 
-    const filtered = allLow.filter((sp) => sp.quantity <= sp.quantityAlert);
+    let filtered = rows.filter((sp) => sp.quantity <= sp.quantityAlert);
+    if (level === 'critical') {
+      filtered = filtered.filter((sp) => sp.quantity === 0);
+    } else if (level === 'warning') {
+      filtered = filtered.filter((sp) => sp.quantity > 0);
+    }
     const total = filtered.length;
     const data = filtered.slice(skip, skip + limit);
 

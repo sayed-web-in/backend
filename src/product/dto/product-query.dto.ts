@@ -1,4 +1,11 @@
-import { IsOptional, IsInt, IsEnum, IsBoolean, IsNumber } from 'class-validator';
+import {
+  IsOptional,
+  IsInt,
+  IsEnum,
+  IsBoolean,
+  IsNumber,
+  IsIn,
+} from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { ProductStatus, SellingType } from '@prisma/client';
 import { PaginationDto } from '../../common/pagination.dto.js';
@@ -58,4 +65,41 @@ export class StoreProductQueryDto extends PaginationDto {
   @Type(() => Number)
   @IsInt()
   branchId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  brandId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  categoryId?: number;
+
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  isActive?: boolean;
+
+  /** Low-stock only: critical (qty 0) or warning (qty above 0 but at or below alert). */
+  @IsOptional()
+  @IsIn(['critical', 'warning'])
+  level?: 'critical' | 'warning';
+}
+
+/** Draft / catalog product list (not store SKUs). */
+export class DraftProductQueryDto extends PaginationDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  brandId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  categoryId?: number;
+
+  @IsOptional()
+  @IsEnum(ProductStatus)
+  status?: ProductStatus;
 }
