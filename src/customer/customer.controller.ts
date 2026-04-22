@@ -27,9 +27,14 @@ export class CustomerController {
     return this.customerService.findAll(query);
   }
 
+  @Get('summary')
+  getSummary(@Query() query: PaginationDto) {
+    return this.customerService.getSummary(query);
+  }
+
   @Get('due')
-  getDueCustomers() {
-    return this.customerService.getDueCustomers();
+  getDueCustomers(@Query() query: PaginationDto) {
+    return this.customerService.getDueCustomers(query);
   }
 
   @Get(':id')

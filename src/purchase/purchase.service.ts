@@ -13,6 +13,51 @@ import { Prisma } from '@prisma/client';
 export class PurchaseService {
   constructor(private prisma: PrismaService) {}
 
+  private purchaseWhereFromDto(query: PurchaseQueryDto) {
+    const { branchId, supplierId, status, search, dateFrom, dateTo } = query;
+    const where: any = {};
+    if (branchId) where.branchId = branchId;
+    if (supplierId) where.supplierId = supplierId;
+    if (status) where.status = status;
+    if (search) {
+      where.OR = [
+        { referenceNo: { contains: search } },
+        { supplier: { name: { contains: search } } },
+      ];
+    }
+    if (dateFrom || dateTo) {
+      where.createdAt = {};
+      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
+      if (dateTo) where.createdAt.lte = new Date(dateTo);
+    }
+    return where;
+  }
+
+  private purchaseReturnWhereFromDto(query: PurchaseQueryDto) {
+    const { branchId, search, dateFrom, dateTo, supplierId } = query;
+    const parts: any[] = [];
+    if (branchId) parts.push({ purchase: { branchId } });
+    if (supplierId) parts.push({ purchase: { supplierId } });
+    if (search) {
+      parts.push({
+        OR: [
+          { reason: { contains: search } },
+          { purchase: { referenceNo: { contains: search } } },
+          { purchase: { supplier: { name: { contains: search } } } },
+        ],
+      });
+    }
+    if (dateFrom || dateTo) {
+      const range: any = {};
+      if (dateFrom) range.gte = new Date(dateFrom);
+      if (dateTo) range.lte = new Date(dateTo);
+      parts.push({ createdAt: range });
+    }
+    if (parts.length === 0) return {};
+    if (parts.length === 1) return parts[0];
+    return { AND: parts };
+  }
+
   private generateReferenceNo(): string {
     const ts = Date.now();
     const rand = Math.floor(1000 + Math.random() * 9000);
@@ -179,32 +224,10 @@ export class PurchaseService {
   }
 
   async findAll(query: PurchaseQueryDto) {
-    const {
-      page = 1,
-      limit = 16,
-      search,
-      branchId,
-      supplierId,
-      status,
-      dateFrom,
-      dateTo,
-      sort,
-      order = 'desc',
-    } = query;
+    const { page = 1, limit = 16, sort, order = 'desc' } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
-    if (branchId) where.branchId = branchId;
-    if (supplierId) where.supplierId = supplierId;
-    if (status) where.status = status;
-    if (search) {
-      where.referenceNo = { contains: search };
-    }
-    if (dateFrom || dateTo) {
-      where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
-    }
+    const where = this.purchaseWhereFromDto(query);
 
     const orderBy: any = {};
     if (sort) {
@@ -229,6 +252,31 @@ export class PurchaseService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getSummary(query: PurchaseQueryDto) {
+    const where = this.purchaseWhereFromDto(query);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const todayWhere = {
+      AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }],
+    };
+
+    const [total, pending, sumAgg, todayCount] = await Promise.all([
+      this.prisma.purchase.count({ where }),
+      this.prisma.purchase.count({ where: { AND: [where, { status: 'PENDING' }] } }),
+      this.prisma.purchase.aggregate({ where, _sum: { grandTotal: true } }),
+      this.prisma.purchase.count({ where: todayWhere }),
+    ]);
+
+    return {
+      total,
+      pending,
+      totalAmount: Number(sumAgg._sum.grandTotal ?? 0),
+      todayPurchases: todayCount,
+    };
   }
 
   async findOne(id: number) {
@@ -360,6 +408,58 @@ export class PurchaseService {
 
       return purchaseReturn;
     });
+  }
+
+  async findReturns(query: PurchaseQueryDto) {
+    const { page = 1, limit = 16 } = query;
+    const skip = (page - 1) * limit;
+    const where = this.purchaseReturnWhereFromDto(query);
+
+    const [data, total] = await Promise.all([
+      this.prisma.purchaseReturn.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          purchase: {
+            select: {
+              id: true,
+              referenceNo: true,
+              supplier: true,
+              branch: true,
+            },
+          },
+          items: true,
+        },
+      }),
+      this.prisma.purchaseReturn.count({ where }),
+    ]);
+
+    return paginate(data, total, page, limit);
+  }
+
+  async getReturnSummary(query: PurchaseQueryDto) {
+    const where = this.purchaseReturnWhereFromDto(query);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const todayWhere = {
+      AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }],
+    };
+
+    const [total, todayReturns, sumAgg] = await Promise.all([
+      this.prisma.purchaseReturn.count({ where }),
+      this.prisma.purchaseReturn.count({ where: todayWhere }),
+      this.prisma.purchaseReturn.aggregate({ where, _sum: { totalAmount: true } }),
+    ]);
+
+    return {
+      total,
+      todayReturns,
+      totalAmount: Number(sumAgg._sum.totalAmount ?? 0),
+    };
   }
 
   private async getTotalReturnedQuantities(

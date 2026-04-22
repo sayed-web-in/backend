@@ -29,6 +29,21 @@ export class PurchaseController {
     return this.purchaseService.findAll(query);
   }
 
+  @Get('summary')
+  getSummary(@Query() query: PurchaseQueryDto) {
+    return this.purchaseService.getSummary(query);
+  }
+
+  @Get('returns')
+  findReturns(@Query() query: PurchaseQueryDto) {
+    return this.purchaseService.findReturns(query);
+  }
+
+  @Get('returns/summary')
+  getReturnSummary(@Query() query: PurchaseQueryDto) {
+    return this.purchaseService.getReturnSummary(query);
+  }
+
   @Get('products')
   getPurchaseProducts(@Query() query: PurchaseQueryDto) {
     return this.purchaseService.getPurchaseProducts(query);

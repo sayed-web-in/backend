@@ -15,7 +15,7 @@ import { CreateSupplierDto } from './dto/create-supplier.dto.js';
 import { UpdateSupplierDto } from './dto/update-supplier.dto.js';
 import { QuickPaymentDto } from './dto/quick-payment.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
-import { PaginationDto } from '../common/pagination.dto.js';
+import { SupplierQueryDto } from './dto/supplier-query.dto.js';
 
 @Controller('suppliers')
 @UseGuards(JwtAuthGuard)
@@ -23,8 +23,13 @@ export class SupplierController {
   constructor(private readonly supplierService: SupplierService) {}
 
   @Get()
-  findAll(@Query() query: PaginationDto) {
+  findAll(@Query() query: SupplierQueryDto) {
     return this.supplierService.findAll(query);
+  }
+
+  @Get('summary')
+  getSummary(@Query() query: SupplierQueryDto) {
+    return this.supplierService.getSummary(query);
   }
 
   @Get(':id')

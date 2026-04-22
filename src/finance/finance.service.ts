@@ -15,6 +15,42 @@ import { Prisma } from '@prisma/client';
 export class FinanceService {
   constructor(private prisma: PrismaService) {}
 
+  private expenseWhereFromQuery(query: FinanceQueryDto) {
+    const { categoryId, dateFrom, dateTo, search } = query;
+    const where: any = {};
+    if (categoryId) where.categoryId = categoryId;
+    if (dateFrom || dateTo) {
+      where.date = {};
+      if (dateFrom) where.date.gte = new Date(dateFrom);
+      if (dateTo) where.date.lte = new Date(dateTo);
+    }
+    if (search) {
+      where.OR = [
+        { note: { contains: search } },
+        { category: { name: { contains: search } } },
+      ];
+    }
+    return where;
+  }
+
+  private incomeWhereFromQuery(query: FinanceQueryDto) {
+    const { categoryId, dateFrom, dateTo, search } = query;
+    const where: any = {};
+    if (categoryId) where.categoryId = categoryId;
+    if (dateFrom || dateTo) {
+      where.date = {};
+      if (dateFrom) where.date.gte = new Date(dateFrom);
+      if (dateTo) where.date.lte = new Date(dateTo);
+    }
+    if (search) {
+      where.OR = [
+        { note: { contains: search } },
+        { category: { name: { contains: search } } },
+      ];
+    }
+    return where;
+  }
+
   // ─── ACCOUNTS ───────────────────────────────────────────────
 
   async getAccounts() {
@@ -183,13 +219,7 @@ export class FinanceService {
     } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
-    if (categoryId) where.categoryId = categoryId;
-    if (dateFrom || dateTo) {
-      where.date = {};
-      if (dateFrom) where.date.gte = new Date(dateFrom);
-      if (dateTo) where.date.lte = new Date(dateTo);
-    }
+    const where = this.expenseWhereFromQuery(query);
 
     const orderBy: any = {};
     if (sort) {
@@ -210,6 +240,35 @@ export class FinanceService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getExpenseSummary(query: FinanceQueryDto) {
+    const where = this.expenseWhereFromQuery(query);
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(now);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const [totalAgg, monthAgg, dayAgg] = await Promise.all([
+      this.prisma.expense.aggregate({ where, _sum: { amount: true } }),
+      this.prisma.expense.aggregate({
+        where: { AND: [where, { date: { gte: monthStart, lte: monthEnd } }] },
+        _sum: { amount: true },
+      }),
+      this.prisma.expense.aggregate({
+        where: { AND: [where, { date: { gte: dayStart, lte: dayEnd } }] },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    return {
+      totalExpenses: Number(totalAgg._sum.amount ?? 0),
+      thisMonthExpenses: Number(monthAgg._sum.amount ?? 0),
+      todayExpenses: Number(dayAgg._sum.amount ?? 0),
+    };
   }
 
   async createExpense(dto: CreateExpenseDto) {
@@ -326,13 +385,7 @@ export class FinanceService {
     } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
-    if (categoryId) where.categoryId = categoryId;
-    if (dateFrom || dateTo) {
-      where.date = {};
-      if (dateFrom) where.date.gte = new Date(dateFrom);
-      if (dateTo) where.date.lte = new Date(dateTo);
-    }
+    const where = this.incomeWhereFromQuery(query);
 
     const orderBy: any = {};
     if (sort) {
@@ -353,6 +406,35 @@ export class FinanceService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getIncomeSummary(query: FinanceQueryDto) {
+    const where = this.incomeWhereFromQuery(query);
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(now);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const [totalAgg, monthAgg, dayAgg] = await Promise.all([
+      this.prisma.income.aggregate({ where, _sum: { amount: true } }),
+      this.prisma.income.aggregate({
+        where: { AND: [where, { date: { gte: monthStart, lte: monthEnd } }] },
+        _sum: { amount: true },
+      }),
+      this.prisma.income.aggregate({
+        where: { AND: [where, { date: { gte: dayStart, lte: dayEnd } }] },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    return {
+      totalIncome: Number(totalAgg._sum.amount ?? 0),
+      thisMonthIncome: Number(monthAgg._sum.amount ?? 0),
+      todayIncome: Number(dayAgg._sum.amount ?? 0),
+    };
   }
 
   async createIncome(dto: CreateIncomeDto) {

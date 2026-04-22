@@ -10,17 +10,18 @@ import { Prisma } from '@prisma/client';
 export class CustomerService {
   constructor(private prisma: PrismaService) {}
 
+  private whereFromSearch(search?: string): Prisma.CustomerWhereInput {
+    if (!search) return {};
+    return {
+      OR: [{ name: { contains: search } }, { phone: { contains: search } }],
+    };
+  }
+
   async findAll(query: PaginationDto) {
     const { page = 1, limit = 16, search, sort, order = 'desc' } = query;
     const skip = (page - 1) * limit;
 
-    const where: Prisma.CustomerWhereInput = {};
-    if (search) {
-      where.OR = [
-        { name: { contains: search } },
-        { phone: { contains: search } },
-      ];
-    }
+    const where = this.whereFromSearch(search);
 
     const orderBy: any = {};
     if (sort) {
@@ -43,6 +44,49 @@ export class CustomerService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getSummary(query: PaginationDto) {
+    const where = this.whereFromSearch(query.search);
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [total, newThisMonth, dueCustomers, activeCustomers, advanceAgg] =
+      await Promise.all([
+        this.prisma.customer.count({ where }),
+        this.prisma.customer.count({
+          where: { AND: [where, { createdAt: { gte: monthStart } }] },
+        }),
+        this.prisma.customer.count({
+          where: {
+            AND: [
+              where,
+              {
+                OR: [
+                  { totalAdvance: { gt: 0 } },
+                  { sales: { some: { dueAmount: { gt: 0 } } } },
+                ],
+              },
+            ],
+          },
+        }),
+        this.prisma.customer.count({
+          where: { AND: [where, { sales: { some: {} } }] },
+        }),
+        this.prisma.customer.aggregate({
+          where,
+          _sum: { totalAdvance: true },
+        }),
+      ]);
+
+    return {
+      total,
+      active: activeCustomers,
+      totalDue: Number(advanceAgg._sum.totalAdvance ?? 0),
+      newThisMonth,
+      dueCustomers,
+    };
   }
 
   async findOne(id: number) {
@@ -75,25 +119,36 @@ export class CustomerService {
     return this.prisma.customer.delete({ where: { id } });
   }
 
-  async getDueCustomers() {
-    const customers = await this.prisma.customer.findMany({
-      where: {
-        OR: [
-          { totalAdvance: { gt: 0 } },
-          { sales: { some: { dueAmount: { gt: 0 } } } },
-        ],
-      },
-      include: {
-        _count: { select: { orders: true, sales: true } },
-        sales: {
-          where: { dueAmount: { gt: 0 } },
-          select: { id: true, invoiceNumber: true, grandTotal: true, paidAmount: true, dueAmount: true },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+  async getDueCustomers(query: PaginationDto) {
+    const { page = 1, limit = 16, search } = query;
+    const skip = (page - 1) * limit;
+    const searchWhere = this.whereFromSearch(search);
+    const dueWhere: Prisma.CustomerWhereInput = {
+      OR: [
+        { totalAdvance: { gt: 0 } },
+        { sales: { some: { dueAmount: { gt: 0 } } } },
+      ],
+    };
+    const where: Prisma.CustomerWhereInput = { AND: [dueWhere, searchWhere] };
 
-    return customers;
+    const [customers, total] = await Promise.all([
+      this.prisma.customer.findMany({
+        where,
+        skip,
+        take: limit,
+        include: {
+          _count: { select: { orders: true, sales: true } },
+          sales: {
+            where: { dueAmount: { gt: 0 } },
+            select: { id: true, invoiceNumber: true, grandTotal: true, paidAmount: true, dueAmount: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.customer.count({ where }),
+    ]);
+
+    return paginate(customers, total, page, limit);
   }
 
   async addQuickTransaction(customerId: number, dto: QuickTransactionDto) {

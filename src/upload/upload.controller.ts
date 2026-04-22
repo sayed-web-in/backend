@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Controller,
   Post,
   UseGuards,
@@ -10,13 +9,13 @@ import {
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage, memoryStorage } from 'multer';
 import { extname, join } from 'path';
-import { writeFile } from 'fs/promises';
+import { mkdirSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import sharp from 'sharp';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { UploadService } from './upload.service.js';
 
 const storage = diskStorage({
-  destination: join(__dirname, '..', '..', 'uploads'),
+  destination: join(process.cwd(), 'uploads'),
   filename: (_req, file, cb) => {
     const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
     cb(null, uniqueName);
@@ -24,10 +23,23 @@ const storage = diskStorage({
 });
 
 const memory = memoryStorage();
+const bannerStorage = diskStorage({
+  destination: (_req, _file, cb) => {
+    const bannerDir = join(process.cwd(), 'uploads', 'banner');
+    mkdirSync(bannerDir, { recursive: true });
+    cb(null, bannerDir);
+  },
+  filename: (_req, file, cb) => {
+    const uniqueName = `${uuidv4()}${extname(file.originalname) || '.bin'}`;
+    cb(null, uniqueName);
+  },
+});
 
 @Controller('upload')
 @UseGuards(JwtAuthGuard)
 export class UploadController {
+  constructor(private readonly uploadService: UploadService) {}
+
   @Post('single')
   @UseInterceptors(FileInterceptor('file', { storage }))
   uploadSingle(@UploadedFile() file: Express.Multer.File) {
@@ -51,24 +63,20 @@ export class UploadController {
     }),
   )
   async uploadProductImage(@UploadedFile() file: Express.Multer.File) {
-    if (!file?.buffer?.length) {
-      throw new BadRequestException('No file uploaded');
-    }
-    const uploadsDir = join(__dirname, '..', '..', 'uploads');
-    const webpName = `${uuidv4()}.webp`;
-    const outWebp = join(uploadsDir, webpName);
-    try {
-      await sharp(file.buffer)
-        .rotate()
-        .resize(1920, 1920, { fit: 'inside', withoutEnlargement: true })
-        .webp({ quality: 82 })
-        .toFile(outWebp);
-      return { data: { url: `/uploads/${webpName}` } };
-    } catch {
-      const fallback = `${uuidv4()}${extname(file.originalname) || '.bin'}`;
-      const outFallback = join(uploadsDir, fallback);
-      await writeFile(outFallback, file.buffer);
-      return { data: { url: `/uploads/${fallback}` } };
-    }
+    return this.uploadService.uploadOptimizedImage(file);
+  }
+
+  /**
+   * Banner images: optimized and saved inside uploads/banner.
+   */
+  @Post('banner-image')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: bannerStorage,
+      limits: { fileSize: 12 * 1024 * 1024 },
+    }),
+  )
+  async uploadBannerImage(@UploadedFile() file: Express.Multer.File) {
+    return { data: { url: `/uploads/banner/${file.filename}` } };
   }
 }

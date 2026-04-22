@@ -96,6 +96,11 @@ export class FinanceController {
     return this.financeService.getExpenses(query);
   }
 
+  @Get('expenses/summary')
+  getExpenseSummary(@Query() query: FinanceQueryDto) {
+    return this.financeService.getExpenseSummary(query);
+  }
+
   @Post('expenses')
   createExpense(@Body() dto: CreateExpenseDto) {
     return this.financeService.createExpense(dto);
@@ -144,6 +149,11 @@ export class FinanceController {
   @Get('incomes')
   getIncomes(@Query() query: FinanceQueryDto) {
     return this.financeService.getIncomes(query);
+  }
+
+  @Get('incomes/summary')
+  getIncomeSummary(@Query() query: FinanceQueryDto) {
+    return this.financeService.getIncomeSummary(query);
   }
 
   @Post('incomes')

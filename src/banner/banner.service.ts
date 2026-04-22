@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { BannerType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateBannerDto } from './dto/create-banner.dto.js';
@@ -7,6 +7,26 @@ import { UpdateBannerDto } from './dto/update-banner.dto.js';
 @Injectable()
 export class BannerService {
   constructor(private prisma: PrismaService) {}
+
+  private static readonly MAX_HERO_SMALL = 2;
+
+  private async assertHeroSmallLimit(
+    targetType: BannerType,
+    excludeId?: number,
+  ) {
+    if (targetType !== BannerType.HERO_SMALL) return;
+    const count = await this.prisma.banner.count({
+      where: {
+        type: BannerType.HERO_SMALL,
+        ...(excludeId != null ? { id: { not: excludeId } } : {}),
+      },
+    });
+    if (count >= BannerService.MAX_HERO_SMALL) {
+      throw new BadRequestException(
+        `Maximum ${BannerService.MAX_HERO_SMALL} Hero Small banners allowed`,
+      );
+    }
+  }
 
   async findAll(type?: BannerType) {
     const where = type ? { type } : {};
@@ -23,6 +43,7 @@ export class BannerService {
   }
 
   async create(dto: CreateBannerDto) {
+    await this.assertHeroSmallLimit(dto.type);
     return this.prisma.banner.create({
       data: {
         title: dto.title,
@@ -36,7 +57,9 @@ export class BannerService {
   }
 
   async update(id: number, dto: UpdateBannerDto) {
-    await this.findOne(id);
+    const existing = await this.findOne(id);
+    const targetType = dto.type ?? existing.type;
+    await this.assertHeroSmallLimit(targetType, id);
     return this.prisma.banner.update({
       where: { id },
       data: dto,

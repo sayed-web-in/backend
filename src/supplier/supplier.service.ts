@@ -3,15 +3,17 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateSupplierDto } from './dto/create-supplier.dto.js';
 import { UpdateSupplierDto } from './dto/update-supplier.dto.js';
 import { QuickPaymentDto } from './dto/quick-payment.dto.js';
-import { PaginationDto, paginate } from '../common/pagination.dto.js';
+import { paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
+import type { SupplierQueryDto } from './dto/supplier-query.dto.js';
 
 @Injectable()
 export class SupplierService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(query: PaginationDto) {
-    const { page = 1, limit = 16, search, sort, order = 'desc' } = query;
+  async findAll(query: SupplierQueryDto) {
+    const { page = 1, limit = 16, search, sort, order = 'desc', isActive } =
+      query;
     const skip = (page - 1) * limit;
 
     const where: Prisma.SupplierWhereInput = {};
@@ -22,6 +24,7 @@ export class SupplierService {
         { phone: { contains: search } },
       ];
     }
+    if (typeof isActive === 'boolean') where.isActive = isActive;
 
     const orderBy: any = {};
     if (sort) {
@@ -44,6 +47,30 @@ export class SupplierService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getSummary(query: SupplierQueryDto) {
+    const where: Prisma.SupplierWhereInput = {};
+    if (query.search) {
+      where.OR = [
+        { name: { contains: query.search } },
+        { company: { contains: query.search } },
+        { phone: { contains: query.search } },
+      ];
+    }
+    if (typeof query.isActive === 'boolean') where.isActive = query.isActive;
+
+    const [total, active, dueAgg] = await Promise.all([
+      this.prisma.supplier.count({ where }),
+      this.prisma.supplier.count({ where: { AND: [where, { isActive: true }] } }),
+      this.prisma.supplier.aggregate({ where, _sum: { totalDue: true } }),
+    ]);
+
+    return {
+      total,
+      active,
+      totalDue: Number(dueAgg._sum.totalDue ?? 0),
+    };
   }
 
   async findOne(id: number) {
