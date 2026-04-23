@@ -1,4 +1,10 @@
-import { IsString, IsOptional, IsBoolean, IsInt, IsEnum } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsBoolean,
+  IsInt,
+  IsEnum,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { BannerType } from '@prisma/client';
 

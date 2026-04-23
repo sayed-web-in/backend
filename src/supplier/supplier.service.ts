@@ -12,8 +12,14 @@ export class SupplierService {
   constructor(private prisma: PrismaService) {}
 
   async findAll(query: SupplierQueryDto) {
-    const { page = 1, limit = 16, search, sort, order = 'desc', isActive } =
-      query;
+    const {
+      page = 1,
+      limit = 16,
+      search,
+      sort,
+      order = 'desc',
+      isActive,
+    } = query;
     const skip = (page - 1) * limit;
 
     const where: Prisma.SupplierWhereInput = {};
@@ -62,7 +68,9 @@ export class SupplierService {
 
     const [total, active, dueAgg] = await Promise.all([
       this.prisma.supplier.count({ where }),
-      this.prisma.supplier.count({ where: { AND: [where, { isActive: true }] } }),
+      this.prisma.supplier.count({
+        where: { AND: [where, { isActive: true }] },
+      }),
       this.prisma.supplier.aggregate({ where, _sum: { totalDue: true } }),
     ]);
 
@@ -125,8 +133,7 @@ export class SupplierService {
             type: 'DEBIT',
             amount,
             reference: `SUP-PAY-${supplierId}-${Date.now()}`,
-            description:
-              dto.note ?? `Supplier payment - ${supplier.name}`,
+            description: dto.note ?? `Supplier payment - ${supplier.name}`,
           },
         });
 

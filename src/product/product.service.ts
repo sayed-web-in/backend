@@ -57,10 +57,20 @@ export class ProductService {
         slug,
         status: 'DRAFT',
         images: images?.length
-          ? { create: images.map((img) => ({ url: img.url, sortOrder: img.sortOrder ?? 0 })) }
+          ? {
+              create: images.map((img) => ({
+                url: img.url,
+                sortOrder: img.sortOrder ?? 0,
+              })),
+            }
           : undefined,
         specifications: specifications?.length
-          ? { create: specifications.map((s) => ({ name: s.name, value: s.value })) }
+          ? {
+              create: specifications.map((s) => ({
+                name: s.name,
+                value: s.value,
+              })),
+            }
           : undefined,
         variants:
           data.type === ProductType.VARIABLE && variants?.length
@@ -80,7 +90,9 @@ export class ProductService {
       include: {
         images: true,
         specifications: true,
-        variants: { include: { attributes: { include: { attributeValue: true } } } },
+        variants: {
+          include: { attributes: { include: { attributeValue: true } } },
+        },
         category: true,
         subCategory: true,
         brand: true,
@@ -205,7 +217,14 @@ export class ProductService {
     if (brandId) where.brandId = brandId;
     if (status) where.status = status;
 
-    if (isBestDeal !== undefined || isFeatured !== undefined || priceMin || priceMax || branchId || sellingType) {
+    if (
+      isBestDeal !== undefined ||
+      isFeatured !== undefined ||
+      priceMin ||
+      priceMax ||
+      branchId ||
+      sellingType
+    ) {
       const storeWhere: any = {};
       if (isBestDeal !== undefined) storeWhere.isBestDeal = isBestDeal;
       if (isFeatured !== undefined) storeWhere.isFeatured = isFeatured;
@@ -321,7 +340,8 @@ export class ProductService {
     const product = await this.prisma.product.findUnique({ where: { id } });
     if (!product) throw new NotFoundException('Product not found');
 
-    const { images, specifications, variants, ...data } = dto as CreateProductDto;
+    const { images, specifications, variants, ...data } =
+      dto as CreateProductDto;
 
     if (images) {
       await this.prisma.productImage.deleteMany({ where: { productId: id } });
@@ -335,10 +355,20 @@ export class ProductService {
       data: {
         ...data,
         images: images
-          ? { create: images.map((img) => ({ url: img.url, sortOrder: img.sortOrder ?? 0 })) }
+          ? {
+              create: images.map((img) => ({
+                url: img.url,
+                sortOrder: img.sortOrder ?? 0,
+              })),
+            }
           : undefined,
         specifications: specifications
-          ? { create: specifications.map((s) => ({ name: s.name, value: s.value })) }
+          ? {
+              create: specifications.map((s) => ({
+                name: s.name,
+                value: s.value,
+              })),
+            }
           : undefined,
       },
     });
@@ -381,7 +411,9 @@ export class ProductService {
 
     for (const v of variants) {
       if (!v.attributeValueIds?.length) {
-        throw new BadRequestException('Each variant must include at least one attribute value');
+        throw new BadRequestException(
+          'Each variant must include at least one attribute value',
+        );
       }
 
       if (v.id != null) {
@@ -389,13 +421,17 @@ export class ProductService {
           where: { id: v.id, productId },
         });
         if (!row) {
-          throw new BadRequestException(`Variant ${v.id} does not belong to this product`);
+          throw new BadRequestException(
+            `Variant ${v.id} does not belong to this product`,
+          );
         }
 
         const variantUpdate: Prisma.ProductVariantUpdateInput = {
           attributes: {
             deleteMany: {},
-            create: v.attributeValueIds.map((attributeValueId) => ({ attributeValueId })),
+            create: v.attributeValueIds.map((attributeValueId) => ({
+              attributeValueId,
+            })),
           },
         };
         if (v.image !== undefined) variantUpdate.image = v.image;
@@ -412,7 +448,9 @@ export class ProductService {
             sku: v.sku?.trim() || this.generateSku('VAR'),
             image: v.image,
             attributes: {
-              create: v.attributeValueIds.map((attributeValueId) => ({ attributeValueId })),
+              create: v.attributeValueIds.map((attributeValueId) => ({
+                attributeValueId,
+              })),
             },
           },
         });
@@ -428,10 +466,14 @@ export class ProductService {
     if (!sp) throw new NotFoundException('Store product not found');
 
     const updateData: Prisma.StoreProductUpdateInput = {};
-    if (dto.sellingPrice !== undefined) updateData.sellingPrice = dto.sellingPrice;
-    if (dto.discountType !== undefined) updateData.discountType = dto.discountType;
-    if (dto.discountValue !== undefined) updateData.discountValue = dto.discountValue;
-    if (dto.quantityAlert !== undefined) updateData.quantityAlert = dto.quantityAlert;
+    if (dto.sellingPrice !== undefined)
+      updateData.sellingPrice = dto.sellingPrice;
+    if (dto.discountType !== undefined)
+      updateData.discountType = dto.discountType;
+    if (dto.discountValue !== undefined)
+      updateData.discountValue = dto.discountValue;
+    if (dto.quantityAlert !== undefined)
+      updateData.quantityAlert = dto.quantityAlert;
     if (dto.sellingType !== undefined) updateData.sellingType = dto.sellingType;
     if (dto.isBestDeal !== undefined) updateData.isBestDeal = dto.isBestDeal;
     if (dto.isFeatured !== undefined) updateData.isFeatured = dto.isFeatured;
@@ -466,7 +508,9 @@ export class ProductService {
         branch: true,
         productVariant: {
           include: {
-            attributes: { include: { attributeValue: { include: { attribute: true } } } },
+            attributes: {
+              include: { attributeValue: { include: { attribute: true } } },
+            },
           },
         },
         batches: { include: { serialNumbers: true } },
@@ -490,7 +534,11 @@ export class ProductService {
     });
     if (!sp) throw new NotFoundException('Store product not found');
 
-    if (sp._count.saleItems > 0 || sp._count.purchaseItems > 0 || sp._count.orderItems > 0) {
+    if (
+      sp._count.saleItems > 0 ||
+      sp._count.purchaseItems > 0 ||
+      sp._count.orderItems > 0
+    ) {
       throw new BadRequestException(
         'Cannot delete this store listing: it is linked to sales, purchases, or orders',
       );
@@ -503,7 +551,9 @@ export class ProductService {
     }
 
     if (sp.batches.some((b) => b.soldQty > 0)) {
-      throw new BadRequestException('Cannot delete: a batch has recorded sales');
+      throw new BadRequestException(
+        'Cannot delete: a batch has recorded sales',
+      );
     }
 
     const [adjCount, xferCount] = await Promise.all([
@@ -549,7 +599,10 @@ export class ProductService {
       const variantLabel =
         attrs.length > 0
           ? attrs
-              .map((a) => `${a.attributeValue.attribute.name}: ${a.attributeValue.value}`)
+              .map(
+                (a) =>
+                  `${a.attributeValue.attribute.name}: ${a.attributeValue.value}`,
+              )
               .join(', ')
           : product.type === ProductType.SINGLE
             ? 'Default'
@@ -628,7 +681,15 @@ export class ProductService {
   }
 
   async getStoreProducts(query: StoreProductQueryDto) {
-    const { page = 1, limit = 16, search, branchId, brandId, categoryId, isActive } = query;
+    const {
+      page = 1,
+      limit = 16,
+      search,
+      branchId,
+      brandId,
+      categoryId,
+      isActive,
+    } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -787,10 +848,7 @@ export class ProductService {
     const where: any = {
       status: 'ACTIVE',
       isArchived: false,
-      OR: [
-        { name: { contains: query } },
-        { description: { contains: query } },
-      ],
+      OR: [{ name: { contains: query } }, { description: { contains: query } }],
     };
     if (categoryId) where.categoryId = categoryId;
 

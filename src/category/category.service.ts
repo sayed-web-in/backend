@@ -25,6 +25,9 @@ export class CategoryService {
         take: limit,
         orderBy: { displayOrder: 'asc' },
         include: {
+          subcategories: {
+            orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+          },
           _count: { select: { subcategories: true } },
           branches: { include: { branch: true } },
         },
@@ -39,7 +42,9 @@ export class CategoryService {
     const category = await this.prisma.category.findUnique({
       where: { id },
       include: {
-        subcategories: true,
+        subcategories: {
+          orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+        },
         branches: { include: { branch: true } },
       },
     });
@@ -69,7 +74,9 @@ export class CategoryService {
     const { branchIds, ...data } = dto;
 
     if (branchIds) {
-      await this.prisma.categoryBranch.deleteMany({ where: { categoryId: id } });
+      await this.prisma.categoryBranch.deleteMany({
+        where: { categoryId: id },
+      });
     }
 
     return this.prisma.category.update({

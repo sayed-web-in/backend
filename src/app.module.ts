@@ -21,6 +21,10 @@ import { SupplierModule } from './supplier/supplier.module.js';
 import { OrderModule } from './order/order.module.js';
 import { FinanceModule } from './finance/finance.module.js';
 import { ReportModule } from './report/report.module.js';
+import { FaqModule } from './faq/faq.module.js';
+import { ShortFeatureModule } from './short-feature/short-feature.module.js';
+import { StorefrontSettingsModule } from './storefront-settings/storefront-settings.module.js';
+import { StoreLocationModule } from './store-location/store-location.module.js';
 
 @Module({
   imports: [
@@ -44,6 +48,10 @@ import { ReportModule } from './report/report.module.js';
     OrderModule,
     FinanceModule,
     ReportModule,
+    FaqModule,
+    ShortFeatureModule,
+    StorefrontSettingsModule,
+    StoreLocationModule,
   ],
   controllers: [AppController],
   providers: [AppService],

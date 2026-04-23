@@ -140,7 +140,13 @@ export class CustomerService {
           _count: { select: { orders: true, sales: true } },
           sales: {
             where: { dueAmount: { gt: 0 } },
-            select: { id: true, invoiceNumber: true, grandTotal: true, paidAmount: true, dueAmount: true },
+            select: {
+              id: true,
+              invoiceNumber: true,
+              grandTotal: true,
+              paidAmount: true,
+              dueAmount: true,
+            },
           },
         },
         orderBy: { createdAt: 'desc' },

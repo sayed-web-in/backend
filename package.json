@@ -21,6 +21,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
+    "db:seed:extra-categories": "ts-node --project prisma/tsconfig.seed.json prisma/seed-extra-categories.ts",
+    "db:seed:articles": "ts-node --project prisma/tsconfig.seed.json prisma/seed-articles.ts",
+    "db:seed:faqs": "ts-node --project prisma/tsconfig.seed.json prisma/seed-faqs.ts",
+    "db:seed:short-features": "ts-node --project prisma/tsconfig.seed.json prisma/seed-short-features.ts",
+    "db:seed:storefront-settings": "ts-node --project prisma/tsconfig.seed.json prisma/seed-storefront-settings.ts",
     "postinstall": "prisma generate"
   },
   "prisma": {

@@ -102,7 +102,14 @@ export class StockService {
   }
 
   async getAdjustments(query: StockQueryDto) {
-    const { page = 1, limit = 16, search, branchId, sort, order = 'desc' } = query;
+    const {
+      page = 1,
+      limit = 16,
+      search,
+      branchId,
+      sort,
+      order = 'desc',
+    } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -135,7 +142,9 @@ export class StockService {
 
   async createTransfer(dto: CreateTransferDto) {
     if (dto.fromBranchId === dto.toBranchId) {
-      throw new BadRequestException('Source and destination branches must differ');
+      throw new BadRequestException(
+        'Source and destination branches must differ',
+      );
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -253,7 +262,14 @@ export class StockService {
   }
 
   async getTransfers(query: StockQueryDto) {
-    const { page = 1, limit = 16, search, branchId, sort, order = 'desc' } = query;
+    const {
+      page = 1,
+      limit = 16,
+      search,
+      branchId,
+      sort,
+      order = 'desc',
+    } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};

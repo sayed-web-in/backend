@@ -30,7 +30,9 @@ export class UploadService {
     const quality = options.quality ?? 82;
     const webpName = `${uuidv4()}.webp`;
     const webpPath = join(targetDir, webpName);
-    const publicPrefix = options.subDir ? `/uploads/${options.subDir}` : '/uploads';
+    const publicPrefix = options.subDir
+      ? `/uploads/${options.subDir}`
+      : '/uploads';
 
     try {
       await sharp(file.buffer)

@@ -49,7 +49,10 @@ export class UploadController {
   @Post('multiple')
   @UseInterceptors(FilesInterceptor('files', 10, { storage }))
   uploadMultiple(@UploadedFiles() files: Express.Multer.File[]) {
-    return files.map((f) => ({ url: `/uploads/${f.filename}`, filename: f.filename }));
+    return files.map((f) => ({
+      url: `/uploads/${f.filename}`,
+      filename: f.filename,
+    }));
   }
 
   /**

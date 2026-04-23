@@ -68,9 +68,9 @@ export class SaleService {
 
       for (const item of dto.items) {
         const itemDiscount = new Prisma.Decimal(item.discount ?? 0);
-        const itemTotal = new Prisma.Decimal(item.unitPrice * item.quantity).sub(
-          itemDiscount,
-        );
+        const itemTotal = new Prisma.Decimal(
+          item.unitPrice * item.quantity,
+        ).sub(itemDiscount);
 
         const saleItem = await tx.saleItem.create({
           data: {
@@ -233,7 +233,10 @@ export class SaleService {
   }
 
   private saleReturnWhereFromDto(
-    query: Pick<SaleReturnQueryDto, 'branchId' | 'search' | 'dateFrom' | 'dateTo'>,
+    query: Pick<
+      SaleReturnQueryDto,
+      'branchId' | 'search' | 'dateFrom' | 'dateTo'
+    >,
   ): any {
     const { branchId, search, dateFrom, dateTo } = query;
     const parts: any[] = [];
@@ -296,7 +299,9 @@ export class SaleService {
     startOfToday.setHours(0, 0, 0, 0);
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
-    const todayWhere = { AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }] };
+    const todayWhere = {
+      AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }],
+    };
 
     const [total, sumAll, todayCount, todaySum] = await Promise.all([
       this.prisma.sale.count({ where }),
@@ -354,7 +359,9 @@ export class SaleService {
     startOfToday.setHours(0, 0, 0, 0);
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
-    const todayWhere = { AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }] };
+    const todayWhere = {
+      AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }],
+    };
 
     const [total, sumAgg, todayCount] = await Promise.all([
       this.prisma.saleReturn.count({ where }),
@@ -383,7 +390,11 @@ export class SaleService {
           include: {
             storeProduct: {
               include: {
-                product: { include: { images: { take: 1, orderBy: { sortOrder: 'asc' } } } },
+                product: {
+                  include: {
+                    images: { take: 1, orderBy: { sortOrder: 'asc' } },
+                  },
+                },
                 productVariant: {
                   include: {
                     attributes: { include: { attributeValue: true } },
@@ -587,7 +598,11 @@ export class SaleService {
           include: {
             storeProduct: {
               include: {
-                product: { include: { images: { take: 1, orderBy: { sortOrder: 'asc' } } } },
+                product: {
+                  include: {
+                    images: { take: 1, orderBy: { sortOrder: 'asc' } },
+                  },
+                },
                 branch: true,
               },
             },

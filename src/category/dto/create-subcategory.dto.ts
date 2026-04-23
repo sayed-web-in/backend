@@ -1,4 +1,5 @@
-import { IsString, IsOptional, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsInt } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateSubCategoryDto {
   @IsString()
@@ -11,6 +12,11 @@ export class CreateSubCategoryDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  displayOrder?: number;
 
   @IsOptional()
   @IsBoolean()

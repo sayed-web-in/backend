@@ -12,7 +12,8 @@ export class ReportService {
     if (query.dateFrom || query.dateTo) {
       where.createdAt = {};
       if (query.dateFrom) where.createdAt.gte = new Date(query.dateFrom);
-      if (query.dateTo) where.createdAt.lte = new Date(query.dateTo + 'T23:59:59.999Z');
+      if (query.dateTo)
+        where.createdAt.lte = new Date(query.dateTo + 'T23:59:59.999Z');
     }
     return where;
   }
@@ -22,7 +23,8 @@ export class ReportService {
     if (query.dateFrom || query.dateTo) {
       where[field] = {};
       if (query.dateFrom) where[field].gte = new Date(query.dateFrom);
-      if (query.dateTo) where[field].lte = new Date(query.dateTo + 'T23:59:59.999Z');
+      if (query.dateTo)
+        where[field].lte = new Date(query.dateTo + 'T23:59:59.999Z');
     }
     return where;
   }
@@ -57,54 +59,61 @@ export class ReportService {
         },
       }),
 
-      this.prisma.sale.groupBy({
-        by: ['createdAt'],
-        where,
-        _count: { id: true },
-        _sum: { grandTotal: true },
-        orderBy: { createdAt: 'asc' },
-      }).then((rows) => {
-        const map = new Map<string, { date: string; count: number; revenue: number }>();
-        for (const row of rows) {
-          const day = row.createdAt.toISOString().slice(0, 10);
-          const existing = map.get(day);
-          if (existing) {
-            existing.count += row._count.id;
-            existing.revenue += Number(row._sum.grandTotal ?? 0);
-          } else {
-            map.set(day, {
-              date: day,
-              count: row._count.id,
-              revenue: Number(row._sum.grandTotal ?? 0),
-            });
+      this.prisma.sale
+        .groupBy({
+          by: ['createdAt'],
+          where,
+          _count: { id: true },
+          _sum: { grandTotal: true },
+          orderBy: { createdAt: 'asc' },
+        })
+        .then((rows) => {
+          const map = new Map<
+            string,
+            { date: string; count: number; revenue: number }
+          >();
+          for (const row of rows) {
+            const day = row.createdAt.toISOString().slice(0, 10);
+            const existing = map.get(day);
+            if (existing) {
+              existing.count += row._count.id;
+              existing.revenue += Number(row._sum.grandTotal ?? 0);
+            } else {
+              map.set(day, {
+                date: day,
+                count: row._count.id,
+                revenue: Number(row._sum.grandTotal ?? 0),
+              });
+            }
           }
-        }
-        return [...map.values()];
-      }),
+          return [...map.values()];
+        }),
 
-      this.prisma.saleItem.groupBy({
-        by: ['storeProductId'],
-        where: {
-          sale: where,
-        },
-        _sum: { total: true, quantity: true },
-        orderBy: { _sum: { total: 'desc' } },
-        take: query.limit ?? 10,
-      }).then(async (rows) => {
-        const ids = rows.map((r) => r.storeProductId);
-        const products = await this.prisma.storeProduct.findMany({
-          where: { id: { in: ids } },
-          include: { product: { select: { name: true, sku: true } } },
-        });
-        const pMap = new Map(products.map((p) => [p.id, p]));
-        return rows.map((r) => ({
-          storeProductId: r.storeProductId,
-          productName: pMap.get(r.storeProductId)?.product?.name ?? 'Unknown',
-          sku: pMap.get(r.storeProductId)?.product?.sku,
-          totalRevenue: Number(r._sum.total ?? 0),
-          totalQtySold: Number(r._sum.quantity ?? 0),
-        }));
-      }),
+      this.prisma.saleItem
+        .groupBy({
+          by: ['storeProductId'],
+          where: {
+            sale: where,
+          },
+          _sum: { total: true, quantity: true },
+          orderBy: { _sum: { total: 'desc' } },
+          take: query.limit ?? 10,
+        })
+        .then(async (rows) => {
+          const ids = rows.map((r) => r.storeProductId);
+          const products = await this.prisma.storeProduct.findMany({
+            where: { id: { in: ids } },
+            include: { product: { select: { name: true, sku: true } } },
+          });
+          const pMap = new Map(products.map((p) => [p.id, p]));
+          return rows.map((r) => ({
+            storeProductId: r.storeProductId,
+            productName: pMap.get(r.storeProductId)?.product?.name ?? 'Unknown',
+            sku: pMap.get(r.storeProductId)?.product?.sku,
+            totalRevenue: Number(r._sum.total ?? 0),
+            totalQtySold: Number(r._sum.quantity ?? 0),
+          }));
+        }),
     ]);
 
     return {
@@ -133,51 +142,58 @@ export class ReportService {
         _sum: { grandTotal: true, discount: true, tax: true },
       }),
 
-      this.prisma.purchase.groupBy({
-        by: ['createdAt'],
-        where,
-        _count: { id: true },
-        _sum: { grandTotal: true },
-        orderBy: { createdAt: 'asc' },
-      }).then((rows) => {
-        const map = new Map<string, { date: string; count: number; amount: number }>();
-        for (const row of rows) {
-          const day = row.createdAt.toISOString().slice(0, 10);
-          const existing = map.get(day);
-          if (existing) {
-            existing.count += row._count.id;
-            existing.amount += Number(row._sum.grandTotal ?? 0);
-          } else {
-            map.set(day, {
-              date: day,
-              count: row._count.id,
-              amount: Number(row._sum.grandTotal ?? 0),
-            });
+      this.prisma.purchase
+        .groupBy({
+          by: ['createdAt'],
+          where,
+          _count: { id: true },
+          _sum: { grandTotal: true },
+          orderBy: { createdAt: 'asc' },
+        })
+        .then((rows) => {
+          const map = new Map<
+            string,
+            { date: string; count: number; amount: number }
+          >();
+          for (const row of rows) {
+            const day = row.createdAt.toISOString().slice(0, 10);
+            const existing = map.get(day);
+            if (existing) {
+              existing.count += row._count.id;
+              existing.amount += Number(row._sum.grandTotal ?? 0);
+            } else {
+              map.set(day, {
+                date: day,
+                count: row._count.id,
+                amount: Number(row._sum.grandTotal ?? 0),
+              });
+            }
           }
-        }
-        return [...map.values()];
-      }),
+          return [...map.values()];
+        }),
 
-      this.prisma.purchase.groupBy({
-        by: ['supplierId'],
-        where: { ...where, supplierId: { not: null } },
-        _count: { id: true },
-        _sum: { grandTotal: true },
-        orderBy: { _sum: { grandTotal: 'desc' } },
-        take: query.limit ?? 10,
-      }).then(async (rows) => {
-        const ids = rows.map((r) => r.supplierId!).filter(Boolean) as number[];
-        const suppliers = await this.prisma.supplier.findMany({
-          where: { id: { in: ids } },
-        });
-        const sMap = new Map(suppliers.map((s) => [s.id, s]));
-        return rows.map((r) => ({
-          supplierId: r.supplierId,
-          supplierName: sMap.get(r.supplierId!)?.name ?? 'Unknown',
-          totalPurchases: r._count.id,
-          totalAmount: Number(r._sum.grandTotal ?? 0),
-        }));
-      }),
+      this.prisma.purchase
+        .groupBy({
+          by: ['supplierId'],
+          where: { ...where, supplierId: { not: null } },
+          _count: { id: true },
+          _sum: { grandTotal: true },
+          orderBy: { _sum: { grandTotal: 'desc' } },
+          take: query.limit ?? 10,
+        })
+        .then(async (rows) => {
+          const ids = rows.map((r) => r.supplierId!).filter(Boolean);
+          const suppliers = await this.prisma.supplier.findMany({
+            where: { id: { in: ids } },
+          });
+          const sMap = new Map(suppliers.map((s) => [s.id, s]));
+          return rows.map((r) => ({
+            supplierId: r.supplierId,
+            supplierName: sMap.get(r.supplierId!)?.name ?? 'Unknown',
+            totalPurchases: r._count.id,
+            totalAmount: Number(r._sum.grandTotal ?? 0),
+          }));
+        }),
     ]);
 
     return {
@@ -206,14 +222,22 @@ export class ReportService {
       orderBy: { quantity: 'asc' },
     });
 
-    const grouped = new Map<number, {
-      productId: number;
-      productName: string;
-      sku: string | null;
-      totalQty: number;
-      totalValue: number;
-      branches: { branchId: number; branchName: string; qty: number; sellingPrice: number }[];
-    }>();
+    const grouped = new Map<
+      number,
+      {
+        productId: number;
+        productName: string;
+        sku: string | null;
+        totalQty: number;
+        totalValue: number;
+        branches: {
+          branchId: number;
+          branchName: string;
+          qty: number;
+          sellingPrice: number;
+        }[];
+      }
+    >();
 
     for (const sp of storeProducts) {
       const pid = sp.productId;
@@ -288,7 +312,10 @@ export class ReportService {
       company: s.company,
       totalDue: Number(s.totalDue),
       purchaseCount: s.purchases.length,
-      totalPurchaseAmount: s.purchases.reduce((sum, p) => sum + Number(p.grandTotal), 0),
+      totalPurchaseAmount: s.purchases.reduce(
+        (sum, p) => sum + Number(p.grandTotal),
+        0,
+      ),
     }));
   }
 
@@ -389,19 +416,31 @@ export class ReportService {
         ...(query.branchId ? { branchId: query.branchId } : {}),
       },
       include: {
-        customer: { select: { id: true, name: true, phone: true, email: true } },
+        customer: {
+          select: { id: true, name: true, phone: true, email: true },
+        },
       },
       orderBy: { dueAmount: 'desc' },
     });
 
-    const grouped = new Map<number, {
-      customerId: number;
-      customerName: string;
-      phone: string;
-      email: string | null;
-      totalDue: number;
-      sales: { id: number; invoiceNumber: string; grandTotal: number; paidAmount: number; dueAmount: number; createdAt: Date }[];
-    }>();
+    const grouped = new Map<
+      number,
+      {
+        customerId: number;
+        customerName: string;
+        phone: string;
+        email: string | null;
+        totalDue: number;
+        sales: {
+          id: number;
+          invoiceNumber: string;
+          grandTotal: number;
+          paidAmount: number;
+          dueAmount: number;
+          createdAt: Date;
+        }[];
+      }
+    >();
 
     for (const sale of sales) {
       if (!sale.customer) continue;
@@ -501,7 +540,9 @@ export class ReportService {
       batchId: b.id,
       batchNumber: b.batchNumber,
       batchDate: b.batchDate,
-      daysOld: Math.floor((Date.now() - b.batchDate.getTime()) / (1000 * 60 * 60 * 24)),
+      daysOld: Math.floor(
+        (Date.now() - b.batchDate.getTime()) / (1000 * 60 * 60 * 24),
+      ),
       availableQty: b.availableQty,
       purchaseCost: Number(b.purchaseCost),
       productName: b.storeProduct.product.name,
@@ -524,7 +565,14 @@ export class ReportService {
             id: true,
             sku: true,
             attributes: {
-              include: { attributeValue: { select: { value: true, attribute: { select: { name: true } } } } },
+              include: {
+                attributeValue: {
+                  select: {
+                    value: true,
+                    attribute: { select: { name: true } },
+                  },
+                },
+              },
             },
           },
         },
@@ -532,19 +580,22 @@ export class ReportService {
       orderBy: [{ productId: 'asc' }, { branchId: 'asc' }],
     });
 
-    const grouped = new Map<number, {
-      productId: number;
-      productName: string;
-      sku: string | null;
-      totalQty: number;
-      branches: {
-        branchId: number;
-        branchName: string;
-        quantity: number;
-        sellingPrice: number;
-        variant: string | null;
-      }[];
-    }>();
+    const grouped = new Map<
+      number,
+      {
+        productId: number;
+        productName: string;
+        sku: string | null;
+        totalQty: number;
+        branches: {
+          branchId: number;
+          branchName: string;
+          quantity: number;
+          sellingPrice: number;
+          variant: string | null;
+        }[];
+      }
+    >();
 
     for (const sp of storeProducts) {
       const pid = sp.productId;
@@ -558,7 +609,10 @@ export class ReportService {
 
       const variantLabel = sp.productVariant
         ? sp.productVariant.attributes
-            .map((a) => `${a.attributeValue.attribute.name}: ${a.attributeValue.value}`)
+            .map(
+              (a) =>
+                `${a.attributeValue.attribute.name}: ${a.attributeValue.value}`,
+            )
             .join(', ')
         : null;
 
@@ -582,46 +636,57 @@ export class ReportService {
     const dateWhere = this.dateFieldRange('date', query);
 
     const [byCategory, dailyBreakdown, total] = await Promise.all([
-      this.prisma.expense.groupBy({
-        by: ['categoryId'],
-        where: dateWhere,
-        _sum: { amount: true },
-        _count: { id: true },
-        orderBy: { _sum: { amount: 'desc' } },
-      }).then(async (rows) => {
-        const ids = rows.map((r) => r.categoryId);
-        const cats = await this.prisma.expenseCategory.findMany({
-          where: { id: { in: ids } },
-        });
-        const cMap = new Map(cats.map((c) => [c.id, c.name]));
-        return rows.map((r) => ({
-          categoryId: r.categoryId,
-          categoryName: cMap.get(r.categoryId) ?? 'Unknown',
-          totalAmount: Number(r._sum.amount ?? 0),
-          count: r._count.id,
-        }));
-      }),
+      this.prisma.expense
+        .groupBy({
+          by: ['categoryId'],
+          where: dateWhere,
+          _sum: { amount: true },
+          _count: { id: true },
+          orderBy: { _sum: { amount: 'desc' } },
+        })
+        .then(async (rows) => {
+          const ids = rows.map((r) => r.categoryId);
+          const cats = await this.prisma.expenseCategory.findMany({
+            where: { id: { in: ids } },
+          });
+          const cMap = new Map(cats.map((c) => [c.id, c.name]));
+          return rows.map((r) => ({
+            categoryId: r.categoryId,
+            categoryName: cMap.get(r.categoryId) ?? 'Unknown',
+            totalAmount: Number(r._sum.amount ?? 0),
+            count: r._count.id,
+          }));
+        }),
 
-      this.prisma.expense.groupBy({
-        by: ['date'],
-        where: dateWhere,
-        _sum: { amount: true },
-        _count: { id: true },
-        orderBy: { date: 'asc' },
-      }).then((rows) => {
-        const map = new Map<string, { date: string; total: number; count: number }>();
-        for (const row of rows) {
-          const day = row.date.toISOString().slice(0, 10);
-          const existing = map.get(day);
-          if (existing) {
-            existing.total += Number(row._sum.amount ?? 0);
-            existing.count += row._count.id;
-          } else {
-            map.set(day, { date: day, total: Number(row._sum.amount ?? 0), count: row._count.id });
+      this.prisma.expense
+        .groupBy({
+          by: ['date'],
+          where: dateWhere,
+          _sum: { amount: true },
+          _count: { id: true },
+          orderBy: { date: 'asc' },
+        })
+        .then((rows) => {
+          const map = new Map<
+            string,
+            { date: string; total: number; count: number }
+          >();
+          for (const row of rows) {
+            const day = row.date.toISOString().slice(0, 10);
+            const existing = map.get(day);
+            if (existing) {
+              existing.total += Number(row._sum.amount ?? 0);
+              existing.count += row._count.id;
+            } else {
+              map.set(day, {
+                date: day,
+                total: Number(row._sum.amount ?? 0),
+                count: row._count.id,
+              });
+            }
           }
-        }
-        return [...map.values()];
-      }),
+          return [...map.values()];
+        }),
 
       this.prisma.expense.aggregate({
         where: dateWhere,
@@ -644,46 +709,57 @@ export class ReportService {
     const dateWhere = this.dateFieldRange('date', query);
 
     const [byCategory, dailyBreakdown, total] = await Promise.all([
-      this.prisma.income.groupBy({
-        by: ['categoryId'],
-        where: dateWhere,
-        _sum: { amount: true },
-        _count: { id: true },
-        orderBy: { _sum: { amount: 'desc' } },
-      }).then(async (rows) => {
-        const ids = rows.map((r) => r.categoryId);
-        const cats = await this.prisma.incomeCategory.findMany({
-          where: { id: { in: ids } },
-        });
-        const cMap = new Map(cats.map((c) => [c.id, c.name]));
-        return rows.map((r) => ({
-          categoryId: r.categoryId,
-          categoryName: cMap.get(r.categoryId) ?? 'Unknown',
-          totalAmount: Number(r._sum.amount ?? 0),
-          count: r._count.id,
-        }));
-      }),
+      this.prisma.income
+        .groupBy({
+          by: ['categoryId'],
+          where: dateWhere,
+          _sum: { amount: true },
+          _count: { id: true },
+          orderBy: { _sum: { amount: 'desc' } },
+        })
+        .then(async (rows) => {
+          const ids = rows.map((r) => r.categoryId);
+          const cats = await this.prisma.incomeCategory.findMany({
+            where: { id: { in: ids } },
+          });
+          const cMap = new Map(cats.map((c) => [c.id, c.name]));
+          return rows.map((r) => ({
+            categoryId: r.categoryId,
+            categoryName: cMap.get(r.categoryId) ?? 'Unknown',
+            totalAmount: Number(r._sum.amount ?? 0),
+            count: r._count.id,
+          }));
+        }),
 
-      this.prisma.income.groupBy({
-        by: ['date'],
-        where: dateWhere,
-        _sum: { amount: true },
-        _count: { id: true },
-        orderBy: { date: 'asc' },
-      }).then((rows) => {
-        const map = new Map<string, { date: string; total: number; count: number }>();
-        for (const row of rows) {
-          const day = row.date.toISOString().slice(0, 10);
-          const existing = map.get(day);
-          if (existing) {
-            existing.total += Number(row._sum.amount ?? 0);
-            existing.count += row._count.id;
-          } else {
-            map.set(day, { date: day, total: Number(row._sum.amount ?? 0), count: row._count.id });
+      this.prisma.income
+        .groupBy({
+          by: ['date'],
+          where: dateWhere,
+          _sum: { amount: true },
+          _count: { id: true },
+          orderBy: { date: 'asc' },
+        })
+        .then((rows) => {
+          const map = new Map<
+            string,
+            { date: string; total: number; count: number }
+          >();
+          for (const row of rows) {
+            const day = row.date.toISOString().slice(0, 10);
+            const existing = map.get(day);
+            if (existing) {
+              existing.total += Number(row._sum.amount ?? 0);
+              existing.count += row._count.id;
+            } else {
+              map.set(day, {
+                date: day,
+                total: Number(row._sum.amount ?? 0),
+                count: row._count.id,
+              });
+            }
           }
-        }
-        return [...map.values()];
-      }),
+          return [...map.values()];
+        }),
 
       this.prisma.income.aggregate({
         where: dateWhere,
@@ -746,24 +822,25 @@ export class ReportService {
     let previousPeriod: PreviousPeriodSummary | null = null;
     const prevRange = this.previousPeriodRange(query);
     if (prevRange) {
-      const [prevSales, prevPurchases, prevExpenses, prevIncomes] = await Promise.all([
-        this.prisma.sale.aggregate({
-          where: { createdAt: prevRange, ...branchFilter },
-          _sum: { grandTotal: true },
-        }),
-        this.prisma.purchase.aggregate({
-          where: { createdAt: prevRange, ...branchFilter },
-          _sum: { grandTotal: true },
-        }),
-        this.prisma.expense.aggregate({
-          where: { date: prevRange },
-          _sum: { amount: true },
-        }),
-        this.prisma.income.aggregate({
-          where: { date: prevRange },
-          _sum: { amount: true },
-        }),
-      ]);
+      const [prevSales, prevPurchases, prevExpenses, prevIncomes] =
+        await Promise.all([
+          this.prisma.sale.aggregate({
+            where: { createdAt: prevRange, ...branchFilter },
+            _sum: { grandTotal: true },
+          }),
+          this.prisma.purchase.aggregate({
+            where: { createdAt: prevRange, ...branchFilter },
+            _sum: { grandTotal: true },
+          }),
+          this.prisma.expense.aggregate({
+            where: { date: prevRange },
+            _sum: { amount: true },
+          }),
+          this.prisma.income.aggregate({
+            where: { date: prevRange },
+            _sum: { amount: true },
+          }),
+        ]);
 
       const prevRevenue = Number(prevSales._sum.grandTotal ?? 0);
       const prevCogs = Number(prevPurchases._sum.grandTotal ?? 0);
@@ -803,7 +880,8 @@ export class ReportService {
               : null,
             netProfitChange: netProfit - prevSummary.netProfit,
             netProfitChangePercent: prevSummary.netProfit
-              ? ((netProfit - prevSummary.netProfit) / prevSummary.netProfit) * 100
+              ? ((netProfit - prevSummary.netProfit) / prevSummary.netProfit) *
+                100
               : null,
           }
         : null,

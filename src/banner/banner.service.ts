@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { BannerType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateBannerDto } from './dto/create-banner.dto.js';

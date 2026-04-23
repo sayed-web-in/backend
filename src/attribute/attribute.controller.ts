@@ -34,7 +34,10 @@ export class AttributeController {
 
   @UseGuards(JwtAuthGuard)
   @Patch(':id')
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateAttributeDto) {
+  update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateAttributeDto,
+  ) {
     return this.attributeService.update(id, dto);
   }
 

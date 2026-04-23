@@ -67,7 +67,9 @@ export class ProductController {
 
   @UseGuards(JwtAuthGuard)
   @Delete('store-products/:storeProductId')
-  deleteStoreProduct(@Param('storeProductId', ParseIntPipe) storeProductId: number) {
+  deleteStoreProduct(
+    @Param('storeProductId', ParseIntPipe) storeProductId: number,
+  ) {
     return this.productService.deleteStoreProduct(storeProductId);
   }
 
@@ -96,7 +98,10 @@ export class ProductController {
 
   @Get('search')
   search(@Query('q') q: string, @Query('categoryId') categoryId?: string) {
-    return this.productService.search(q, categoryId ? Number(categoryId) : undefined);
+    return this.productService.search(
+      q,
+      categoryId ? Number(categoryId) : undefined,
+    );
   }
 
   @Get('slug/:slug')

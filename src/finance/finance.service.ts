@@ -246,7 +246,15 @@ export class FinanceService {
     const where = this.expenseWhereFromQuery(query);
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const monthEnd = new Date(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
     const dayStart = new Date(now);
     dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(now);
@@ -412,7 +420,15 @@ export class FinanceService {
     const where = this.incomeWhereFromQuery(query);
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const monthEnd = new Date(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
     const dayStart = new Date(now);
     dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(now);
@@ -507,7 +523,10 @@ export class FinanceService {
       where: { isActive: true },
     });
 
-    const grouped: Record<string, { accounts: typeof accounts; total: Prisma.Decimal }> = {};
+    const grouped: Record<
+      string,
+      { accounts: typeof accounts; total: Prisma.Decimal }
+    > = {};
     let totalAssets = new Prisma.Decimal(0);
 
     for (const acc of accounts) {
@@ -569,12 +588,14 @@ export class FinanceService {
 
       if (txn.type === 'CREDIT') {
         totalInflow = totalInflow.add(txn.amount);
-        monthlyBreakdown[monthKey].inflow =
-          monthlyBreakdown[monthKey].inflow.add(txn.amount);
+        monthlyBreakdown[monthKey].inflow = monthlyBreakdown[
+          monthKey
+        ].inflow.add(txn.amount);
       } else {
         totalOutflow = totalOutflow.add(txn.amount);
-        monthlyBreakdown[monthKey].outflow =
-          monthlyBreakdown[monthKey].outflow.add(txn.amount);
+        monthlyBreakdown[monthKey].outflow = monthlyBreakdown[
+          monthKey
+        ].outflow.add(txn.amount);
       }
       monthlyBreakdown[monthKey].net = monthlyBreakdown[monthKey].inflow.sub(
         monthlyBreakdown[monthKey].outflow,

@@ -60,7 +60,9 @@ export class AttributeService {
     const { values, ...scalar } = dto;
 
     if (values !== undefined) {
-      await this.prisma.attributeValue.deleteMany({ where: { attributeId: id } });
+      await this.prisma.attributeValue.deleteMany({
+        where: { attributeId: id },
+      });
     }
 
     return this.prisma.attribute.update({
@@ -88,7 +90,9 @@ export class AttributeService {
   }
 
   async removeValue(id: number) {
-    const value = await this.prisma.attributeValue.findUnique({ where: { id } });
+    const value = await this.prisma.attributeValue.findUnique({
+      where: { id },
+    });
     if (!value) throw new NotFoundException('Attribute value not found');
     return this.prisma.attributeValue.delete({ where: { id } });
   }

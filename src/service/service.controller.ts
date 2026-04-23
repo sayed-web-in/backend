@@ -32,10 +32,7 @@ export class ServiceController {
   }
 
   @Patch(':id')
-  update(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: UpdateServiceDto,
-  ) {
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateServiceDto) {
     return this.serviceService.update(id, dto);
   }
 

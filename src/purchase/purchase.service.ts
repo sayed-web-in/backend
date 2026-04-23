@@ -1,7 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreatePurchaseDto } from './dto/create-purchase.dto.js';
 import { CreatePurchaseReturnDto } from './dto/create-purchase-return.dto.js';
@@ -77,7 +74,9 @@ export class PurchaseService {
       let totalAmount = new Prisma.Decimal(0);
       for (const item of dto.items) {
         totalAmount = totalAmount.add(
-          new Prisma.Decimal(item.unitCost).mul(new Prisma.Decimal(item.quantity)),
+          new Prisma.Decimal(item.unitCost).mul(
+            new Prisma.Decimal(item.quantity),
+          ),
         );
       }
 
@@ -135,7 +134,10 @@ export class PurchaseService {
 
         // Weighted average cost: ((existingQty * existingAvgCost) + (newQty * cost)) / totalQty
         const existingBatches = await tx.batch.findMany({
-          where: { storeProductId: item.storeProductId, availableQty: { gt: 0 } },
+          where: {
+            storeProductId: item.storeProductId,
+            availableQty: { gt: 0 },
+          },
         });
         let existingTotalCost = new Prisma.Decimal(0);
         let existingTotalQty = 0;
@@ -146,11 +148,16 @@ export class PurchaseService {
           existingTotalQty += b.availableQty;
         }
         const newTotalQty = existingTotalQty + item.quantity;
-        const _weightedAvgCost = newTotalQty > 0
-          ? existingTotalCost
-              .add(new Prisma.Decimal(item.unitCost).mul(new Prisma.Decimal(item.quantity)))
-              .div(new Prisma.Decimal(newTotalQty))
-          : new Prisma.Decimal(item.unitCost);
+        const _weightedAvgCost =
+          newTotalQty > 0
+            ? existingTotalCost
+                .add(
+                  new Prisma.Decimal(item.unitCost).mul(
+                    new Prisma.Decimal(item.quantity),
+                  ),
+                )
+                .div(new Prisma.Decimal(newTotalQty))
+            : new Prisma.Decimal(item.unitCost);
 
         await tx.storeProduct.update({
           where: { id: item.storeProductId },
@@ -266,7 +273,9 @@ export class PurchaseService {
 
     const [total, pending, sumAgg, todayCount] = await Promise.all([
       this.prisma.purchase.count({ where }),
-      this.prisma.purchase.count({ where: { AND: [where, { status: 'PENDING' }] } }),
+      this.prisma.purchase.count({
+        where: { AND: [where, { status: 'PENDING' }] },
+      }),
       this.prisma.purchase.aggregate({ where, _sum: { grandTotal: true } }),
       this.prisma.purchase.count({ where: todayWhere }),
     ]);
@@ -452,7 +461,10 @@ export class PurchaseService {
     const [total, todayReturns, sumAgg] = await Promise.all([
       this.prisma.purchaseReturn.count({ where }),
       this.prisma.purchaseReturn.count({ where: todayWhere }),
-      this.prisma.purchaseReturn.aggregate({ where, _sum: { totalAmount: true } }),
+      this.prisma.purchaseReturn.aggregate({
+        where,
+        _sum: { totalAmount: true },
+      }),
     ]);
 
     return {
@@ -484,14 +496,7 @@ export class PurchaseService {
   }
 
   async getPurchaseProducts(query: PurchaseQueryDto) {
-    const {
-      page = 1,
-      limit = 16,
-      branchId,
-      dateFrom,
-      dateTo,
-      search,
-    } = query;
+    const { page = 1, limit = 16, branchId, dateFrom, dateTo, search } = query;
     const skip = (page - 1) * limit;
 
     const where: any = {};

@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Post, UseGuards, Request } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { RegisterDto } from './dto/register.dto.js';
@@ -30,8 +37,13 @@ export class AuthController {
   }
 
   @Post('customer/google')
-  googleCustomerLogin(@Body() body: { googleId: string; name: string; email: string }) {
-    return this.authService.googleCustomerLogin(body.googleId, { name: body.name, email: body.email });
+  googleCustomerLogin(
+    @Body() body: { googleId: string; name: string; email: string },
+  ) {
+    return this.authService.googleCustomerLogin(body.googleId, {
+      name: body.name,
+      email: body.email,
+    });
   }
 
   @UseGuards(JwtAuthGuard)
