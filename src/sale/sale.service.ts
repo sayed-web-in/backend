@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
+import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
@@ -38,13 +39,15 @@ export class SaleService {
       const grandTotal = totalAmount.sub(discount).add(tax);
 
       const status = dto.status ?? 'COMPLETED';
-      const paidAmount = new Prisma.Decimal(
-        status === 'PAY_LATER' ? 0 : grandTotal.toNumber(),
-      );
-      const dueAmount =
-        status === 'PAY_LATER' ? grandTotal : new Prisma.Decimal(0);
-      const changeAmount = paidAmount.sub(grandTotal).greaterThan(0)
-        ? paidAmount.sub(grandTotal)
+      const requestedPaid = new Prisma.Decimal(dto.paidAmount ?? grandTotal);
+      const grossPaid =
+        status === 'PAY_LATER' ? new Prisma.Decimal(0) : requestedPaid;
+      const changeAmount = grossPaid.sub(grandTotal).greaterThan(0)
+        ? grossPaid.sub(grandTotal)
+        : new Prisma.Decimal(0);
+      const paidAmount = grossPaid.sub(changeAmount);
+      const dueAmount = grandTotal.sub(paidAmount).greaterThan(0)
+        ? grandTotal.sub(paidAmount)
         : new Prisma.Decimal(0);
 
       const sale = await tx.sale.create({
@@ -115,21 +118,57 @@ export class SaleService {
         }
       }
 
-      if (dto.paymentAccountId && status === 'COMPLETED') {
-        await tx.transaction.create({
-          data: {
-            accountId: dto.paymentAccountId,
-            type: 'CREDIT',
-            amount: grandTotal,
-            reference: invoiceNumber,
-            description: `Sale payment - ${invoiceNumber}`,
-          },
-        });
+      if (status === 'COMPLETED') {
+        const netReceived = paidAmount;
+        const providedPayments = Array.isArray(dto.payments)
+          ? dto.payments
+              .map((p) => ({
+                accountId: Number(p.accountId),
+                amount: Number(p.amount ?? 0),
+              }))
+              .filter((p) => Number.isFinite(p.accountId) && p.accountId > 0 && p.amount > 0)
+          : [];
 
-        await tx.account.update({
-          where: { id: dto.paymentAccountId },
-          data: { balance: { increment: grandTotal } },
-        });
+        if (providedPayments.length > 0) {
+          let remaining = netReceived;
+          for (const p of providedPayments) {
+            if (remaining.lte(0)) break;
+            const alloc = Prisma.Decimal.min(remaining, new Prisma.Decimal(p.amount));
+            if (alloc.lte(0)) continue;
+
+            await tx.transaction.create({
+              data: {
+                accountId: p.accountId,
+                type: 'CREDIT',
+                amount: alloc,
+                reference: invoiceNumber,
+                description: `Sale payment - ${invoiceNumber}`,
+              },
+            });
+
+            await tx.account.update({
+              where: { id: p.accountId },
+              data: { balance: { increment: alloc } },
+            });
+
+            remaining = remaining.sub(alloc);
+          }
+        } else if (dto.paymentAccountId) {
+          await tx.transaction.create({
+            data: {
+              accountId: dto.paymentAccountId,
+              type: 'CREDIT',
+              amount: netReceived,
+              reference: invoiceNumber,
+              description: `Sale payment - ${invoiceNumber}`,
+            },
+          });
+
+          await tx.account.update({
+            where: { id: dto.paymentAccountId },
+            data: { balance: { increment: netReceived } },
+          });
+        }
       }
 
       return tx.sale.findUnique({
@@ -159,10 +198,11 @@ export class SaleService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const paidAmount = new Prisma.Decimal(dto.paidAmount);
-      const changeAmount = paidAmount.sub(sale.grandTotal).greaterThan(0)
-        ? paidAmount.sub(sale.grandTotal)
+      const grossPaid = new Prisma.Decimal(dto.paidAmount);
+      const changeAmount = grossPaid.sub(sale.grandTotal).greaterThan(0)
+        ? grossPaid.sub(sale.grandTotal)
         : new Prisma.Decimal(0);
+      const paidAmount = grossPaid.sub(changeAmount);
       const dueAmount = sale.grandTotal.sub(paidAmount).greaterThan(0)
         ? sale.grandTotal.sub(paidAmount)
         : new Prisma.Decimal(0);
@@ -186,11 +226,12 @@ export class SaleService {
       });
 
       if (dto.paymentAccountId) {
+        const netReceived = paidAmount;
         await tx.transaction.create({
           data: {
             accountId: dto.paymentAccountId,
             type: 'CREDIT',
-            amount: paidAmount,
+            amount: netReceived,
             reference: sale.invoiceNumber,
             description: `Pay-later completion - ${sale.invoiceNumber}`,
           },
@@ -198,11 +239,83 @@ export class SaleService {
 
         await tx.account.update({
           where: { id: dto.paymentAccountId },
-          data: { balance: { increment: paidAmount } },
+          data: { balance: { increment: netReceived } },
         });
       }
 
       return updated;
+    });
+  }
+
+  async getSalePayments(saleId: number) {
+    const sale = await this.prisma.sale.findUnique({
+      where: { id: saleId },
+      select: { invoiceNumber: true },
+    });
+    if (!sale) throw new NotFoundException('Sale not found');
+
+    return this.prisma.transaction.findMany({
+      where: { reference: sale.invoiceNumber, type: 'CREDIT' },
+      orderBy: { createdAt: 'desc' },
+      include: { account: true },
+    });
+  }
+
+  async addPayment(saleId: number, dto: AddSalePaymentDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const sale = await tx.sale.findUnique({ where: { id: saleId } });
+      if (!sale) throw new NotFoundException('Sale not found');
+      if (sale.status === 'RETURNED') {
+        throw new BadRequestException('Cannot pay a returned sale');
+      }
+      if (sale.dueAmount.lte(0)) {
+        throw new BadRequestException('No due amount remaining for this sale');
+      }
+
+      const dueBefore = sale.dueAmount;
+      const requested = new Prisma.Decimal(dto.amount);
+      if (requested.gt(dueBefore)) {
+        throw new BadRequestException('Amount cannot exceed due amount');
+      }
+
+      const account = await tx.account.findUnique({ where: { id: dto.accountId } });
+      if (!account) throw new NotFoundException('Account not found');
+
+      const paidAmount = sale.paidAmount.add(requested);
+      const dueAmount = sale.grandTotal.sub(paidAmount).greaterThan(0)
+        ? sale.grandTotal.sub(paidAmount)
+        : new Prisma.Decimal(0);
+
+      const updatedSale = await tx.sale.update({
+        where: { id: saleId },
+        data: {
+          paidAmount,
+          dueAmount,
+          changeAmount: new Prisma.Decimal(0),
+          paymentAccountId: sale.paymentAccountId ?? dto.accountId,
+          status: dueAmount.greaterThan(0) ? sale.status : 'COMPLETED',
+        },
+      });
+
+      const txn = await tx.transaction.create({
+        data: {
+          accountId: dto.accountId,
+          type: 'CREDIT',
+          amount: requested,
+          reference: sale.invoiceNumber,
+          description: dto.note?.trim()
+            ? `Sale due payment - ${sale.invoiceNumber} (${dto.note.trim()})`
+            : `Sale due payment - ${sale.invoiceNumber}`,
+        },
+        include: { account: true },
+      });
+
+      await tx.account.update({
+        where: { id: dto.accountId },
+        data: { balance: { increment: requested } },
+      });
+
+      return { sale: updatedSale, payment: txn };
     });
   }
 

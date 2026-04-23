@@ -66,7 +66,7 @@ export class UploadController {
     }),
   )
   async uploadProductImage(@UploadedFile() file: Express.Multer.File) {
-    return this.uploadService.uploadOptimizedImage(file);
+    return this.uploadService.uploadOptimizedImage(file, { subDir: 'product' });
   }
 
   /**

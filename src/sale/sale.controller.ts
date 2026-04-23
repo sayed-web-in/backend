@@ -11,6 +11,7 @@ import {
 import { SaleService } from './sale.service.js';
 import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
+import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
@@ -68,6 +69,11 @@ export class SaleController {
     return this.saleService.findOne(id);
   }
 
+  @Get(':id/payments')
+  getSalePayments(@Param('id', ParseIntPipe) id: number) {
+    return this.saleService.getSalePayments(id);
+  }
+
   /** Static path before `:id/complete` so Nest never mis-matches `return`. */
   @Post('return')
   createReturn(@Body() dto: CreateSaleReturnDto) {
@@ -80,5 +86,13 @@ export class SaleController {
     @Body() dto: CompletePaylaterDto,
   ) {
     return this.saleService.completePaylater(id, dto);
+  }
+
+  @Post(':id/payments')
+  addPayment(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: AddSalePaymentDto,
+  ) {
+    return this.saleService.addPayment(id, dto);
   }
 }

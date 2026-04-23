@@ -15,10 +15,48 @@ import {
 } from './dto/product-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
 import { Prisma, ProductType, ProductStatus } from '@prisma/client';
+import { unlink } from 'fs/promises';
+import { join } from 'path';
 
 @Injectable()
 export class ProductService {
   constructor(private prisma: PrismaService) {}
+
+  private toUploadsFsPath(url?: string | null): string | null {
+    if (!url) return null;
+    let pathPart = url.trim();
+    if (!pathPart) return null;
+
+    if (/^https?:\/\//i.test(pathPart)) {
+      try {
+        const parsed = new URL(pathPart);
+        pathPart = parsed.pathname || '';
+      } catch {
+        return null;
+      }
+    }
+
+    if (!pathPart.startsWith('/uploads/')) return null;
+
+    const decoded = decodeURIComponent(pathPart).replace(/\\/g, '/');
+    const relative = decoded.replace(/^\/+/, '');
+    if (relative.includes('..')) return null;
+
+    return join(process.cwd(), relative);
+  }
+
+  private async deleteUploadFiles(urls: (string | null | undefined)[]) {
+    const paths = [...new Set(urls.map((u) => this.toUploadsFsPath(u)).filter(Boolean) as string[])];
+    await Promise.all(
+      paths.map(async (p) => {
+        try {
+          await unlink(p);
+        } catch {
+          // Best-effort cleanup; ignore missing/locked files.
+        }
+      }),
+    );
+  }
 
   private generateSlug(name: string): string {
     return name
@@ -255,8 +293,28 @@ export class ProductService {
           category: true,
           brand: true,
           images: { orderBy: { sortOrder: 'asc' }, take: 1 },
+          variants: {
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+            select: { image: true },
+          },
           storeProducts: {
-            include: { branch: true },
+            include: {
+              branch: true,
+              productVariant: {
+                select: {
+                  sku: true,
+                  image: true,
+                  attributes: {
+                    select: {
+                      attributeValue: {
+                        select: { value: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
             take: 5,
           },
         },
@@ -337,13 +395,23 @@ export class ProductService {
   }
 
   async update(id: number, dto: UpdateProductDto) {
-    const product = await this.prisma.product.findUnique({ where: { id } });
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: {
+        images: { select: { url: true } },
+      },
+    });
     if (!product) throw new NotFoundException('Product not found');
 
     const { images, specifications, variants, ...data } =
       dto as CreateProductDto;
 
+    const obsoleteImageUrls: string[] = [];
     if (images) {
+      const nextImageUrls = new Set(images.map((img) => img.url));
+      for (const prev of product.images) {
+        if (!nextImageUrls.has(prev.url)) obsoleteImageUrls.push(prev.url);
+      }
       await this.prisma.productImage.deleteMany({ where: { productId: id } });
     }
     if (specifications) {
@@ -373,13 +441,18 @@ export class ProductService {
       },
     });
 
-    if (
-      variants !== undefined &&
-      product.status === ProductStatus.DRAFT &&
-      product.type === ProductType.VARIABLE
-    ) {
-      await this.reconcileDraftVariants(id, variants);
+    const obsoleteVariantImageUrls: string[] = [];
+    if (variants !== undefined && product.type === ProductType.VARIABLE) {
+      if (product.status === ProductStatus.DRAFT) {
+        const removed = await this.reconcileDraftVariants(id, variants);
+        obsoleteVariantImageUrls.push(...removed);
+      } else {
+        const removed = await this.appendVariantsForNonDraft(id, variants);
+        obsoleteVariantImageUrls.push(...removed);
+      }
     }
+
+    await this.deleteUploadFiles([...obsoleteImageUrls, ...obsoleteVariantImageUrls]);
 
     return this.findOne(id);
   }
@@ -390,11 +463,13 @@ export class ProductService {
   private async reconcileDraftVariants(
     productId: number,
     variants: NonNullable<CreateProductDto['variants']>,
-  ) {
+  ): Promise<string[]> {
+    const removedImageUrls: string[] = [];
     const existing = await this.prisma.productVariant.findMany({
       where: { productId },
       select: {
         id: true,
+        image: true,
         _count: { select: { storeProducts: true } },
       },
     });
@@ -406,6 +481,7 @@ export class ProductService {
     for (const ex of existing) {
       if (!incomingWithId.has(ex.id) && ex._count.storeProducts === 0) {
         await this.prisma.productVariant.delete({ where: { id: ex.id } });
+        if (ex.image) removedImageUrls.push(ex.image);
       }
     }
 
@@ -419,6 +495,7 @@ export class ProductService {
       if (v.id != null) {
         const row = await this.prisma.productVariant.findFirst({
           where: { id: v.id, productId },
+          select: { id: true, image: true },
         });
         if (!row) {
           throw new BadRequestException(
@@ -434,7 +511,10 @@ export class ProductService {
             })),
           },
         };
-        if (v.image !== undefined) variantUpdate.image = v.image;
+        if (v.image !== undefined) {
+          variantUpdate.image = v.image;
+          if (row.image && row.image !== v.image) removedImageUrls.push(row.image);
+        }
         if (v.sku?.trim()) variantUpdate.sku = v.sku.trim();
 
         await this.prisma.productVariant.update({
@@ -456,6 +536,95 @@ export class ProductService {
         });
       }
     }
+    return removedImageUrls;
+  }
+
+  /**
+   * Non-draft products: only append newly added variants (no id).
+   * Existing variants are kept unchanged to avoid accidental destructive edits.
+   */
+  private async appendVariantsForNonDraft(
+    productId: number,
+    variants: NonNullable<CreateProductDto['variants']>,
+  ): Promise<string[]> {
+    const removedImageUrls: string[] = [];
+    const existing = await this.prisma.productVariant.findMany({
+      where: { productId },
+      select: {
+        id: true,
+        sku: true,
+        image: true,
+        attributes: {
+          select: { attributeValueId: true },
+        },
+      },
+    });
+
+    const existingSkus = new Set(
+      existing.map((v) => (v.sku || '').trim().toLowerCase()).filter(Boolean),
+    );
+
+    const existingAttrKeys = new Set(
+      existing.map((v) =>
+        v.attributes
+          .map((a) => a.attributeValueId)
+          .sort((a, b) => a - b)
+          .join(':'),
+      ),
+    );
+    const existingById = new Map(existing.map((v) => [v.id, v]));
+
+    for (const v of variants) {
+      if (!v.attributeValueIds?.length) {
+        throw new BadRequestException(
+          'Each variant must include at least one attribute value',
+        );
+      }
+
+      if (v.id != null) {
+        const row = existingById.get(v.id);
+        if (!row) continue;
+
+        const variantUpdate: Prisma.ProductVariantUpdateInput = {};
+        if (v.sku?.trim()) variantUpdate.sku = v.sku.trim();
+        if (v.image !== undefined) {
+          variantUpdate.image = v.image;
+          if (row.image && row.image !== v.image) removedImageUrls.push(row.image);
+        }
+        if (Object.keys(variantUpdate).length > 0) {
+          await this.prisma.productVariant.update({
+            where: { id: v.id },
+            data: variantUpdate,
+          });
+        }
+        continue;
+      }
+
+      const skuKey = (v.sku || '').trim().toLowerCase();
+      const attrKey = [...v.attributeValueIds].sort((a, b) => a - b).join(':');
+
+      // Skip duplicates so repeated saves don't create the same new variant again.
+      if ((skuKey && existingSkus.has(skuKey)) || existingAttrKeys.has(attrKey)) {
+        continue;
+      }
+
+      await this.prisma.productVariant.create({
+        data: {
+          productId,
+          sku: v.sku?.trim() || this.generateSku('VAR'),
+          image: v.image,
+          attributes: {
+            create: v.attributeValueIds.map((attributeValueId) => ({
+              attributeValueId,
+            })),
+          },
+        },
+      });
+
+      if (skuKey) existingSkus.add(skuKey);
+      existingAttrKeys.add(attrKey);
+    }
+    return removedImageUrls;
   }
 
   async updateStoreProduct(storeProductId: number, dto: UpdateStoreProductDto) {
@@ -770,6 +939,11 @@ export class ProductService {
           category: true,
           brand: true,
           images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          variants: {
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+            select: { image: true },
+          },
         },
       }),
       this.prisma.product.count({ where }),
@@ -856,10 +1030,16 @@ export class ProductService {
       where,
       include: {
         images: { take: 1, orderBy: { sortOrder: 'asc' } },
+        variants: {
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+          select: { image: true },
+        },
         category: true,
         brand: true,
         storeProducts: {
           where: { isActive: true, sellingType: { in: ['ONLINE', 'BOTH'] } },
+          include: { productVariant: { select: { image: true } } },
           take: 1,
         },
       },

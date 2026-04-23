@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateCustomerDto } from './dto/create-customer.dto.js';
 import { UpdateCustomerDto } from './dto/update-customer.dto.js';
@@ -38,6 +38,10 @@ export class CustomerService {
         orderBy,
         include: {
           _count: { select: { orders: true, sales: true } },
+          sales: {
+            where: { dueAmount: { gt: 0 } },
+            select: { dueAmount: true },
+          },
         },
       }),
       this.prisma.customer.count({ where }),
@@ -52,7 +56,7 @@ export class CustomerService {
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
 
-    const [total, newThisMonth, dueCustomers, activeCustomers, advanceAgg] =
+    const [total, newThisMonth, dueCustomers, activeCustomers, salesDueAgg] =
       await Promise.all([
         this.prisma.customer.count({ where }),
         this.prisma.customer.count({
@@ -63,10 +67,7 @@ export class CustomerService {
             AND: [
               where,
               {
-                OR: [
-                  { totalAdvance: { gt: 0 } },
-                  { sales: { some: { dueAmount: { gt: 0 } } } },
-                ],
+                sales: { some: { dueAmount: { gt: 0 } } },
               },
             ],
           },
@@ -74,16 +75,19 @@ export class CustomerService {
         this.prisma.customer.count({
           where: { AND: [where, { sales: { some: {} } }] },
         }),
-        this.prisma.customer.aggregate({
-          where,
-          _sum: { totalAdvance: true },
+        this.prisma.sale.aggregate({
+          where: {
+            dueAmount: { gt: 0 },
+            customer: where,
+          },
+          _sum: { dueAmount: true },
         }),
       ]);
 
     return {
       total,
       active: activeCustomers,
-      totalDue: Number(advanceAgg._sum.totalAdvance ?? 0),
+      totalDue: Number(salesDueAgg._sum.dueAmount ?? 0),
       newThisMonth,
       dueCustomers,
     };
@@ -104,12 +108,36 @@ export class CustomerService {
   }
 
   async create(dto: CreateCustomerDto) {
+    const normalizedPhone = String(dto.phone ?? '').trim();
+    if (!normalizedPhone) {
+      throw new BadRequestException('Phone is required');
+    }
+    const existingByPhone = await this.prisma.customer.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true },
+    });
+    if (existingByPhone) {
+      throw new BadRequestException('Customer phone must be unique');
+    }
     return this.prisma.customer.create({ data: dto });
   }
 
   async update(id: number, dto: UpdateCustomerDto) {
     const customer = await this.prisma.customer.findUnique({ where: { id } });
     if (!customer) throw new NotFoundException('Customer not found');
+    if (dto.phone != null) {
+      const normalizedPhone = String(dto.phone).trim();
+      if (!normalizedPhone) {
+        throw new BadRequestException('Phone is required');
+      }
+      const existingByPhone = await this.prisma.customer.findFirst({
+        where: { phone: normalizedPhone, id: { not: id } },
+        select: { id: true },
+      });
+      if (existingByPhone) {
+        throw new BadRequestException('Customer phone must be unique');
+      }
+    }
     return this.prisma.customer.update({ where: { id }, data: dto });
   }
 
@@ -124,10 +152,7 @@ export class CustomerService {
     const skip = (page - 1) * limit;
     const searchWhere = this.whereFromSearch(search);
     const dueWhere: Prisma.CustomerWhereInput = {
-      OR: [
-        { totalAdvance: { gt: 0 } },
-        { sales: { some: { dueAmount: { gt: 0 } } } },
-      ],
+      sales: { some: { dueAmount: { gt: 0 } } },
     };
     const where: Prisma.CustomerWhereInput = { AND: [dueWhere, searchWhere] };
 
@@ -182,13 +207,13 @@ export class CustomerService {
 
     const salesAgg = await this.prisma.sale.aggregate({
       where: { customerId: id },
-      _sum: { grandTotal: true, paidAmount: true },
+      _sum: { grandTotal: true, paidAmount: true, dueAmount: true },
     });
 
     const totalAdvance = customer.totalAdvance;
     const totalPurchase = salesAgg._sum.grandTotal ?? new Prisma.Decimal(0);
     const totalPaid = salesAgg._sum.paidAmount ?? new Prisma.Decimal(0);
-    const totalDue = totalPurchase.sub(totalPaid).sub(totalAdvance);
+    const totalDue = salesAgg._sum.dueAmount ?? new Prisma.Decimal(0);
 
     return {
       totalAdvance,

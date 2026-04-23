@@ -33,6 +33,15 @@ export class CreateSaleItemDto {
   serialNumbers?: string[];
 }
 
+export class CreateSalePaymentDto {
+  @IsInt()
+  accountId: number;
+
+  @IsNumber()
+  @Min(0)
+  amount: number;
+}
+
 export class CreateSaleDto {
   @IsOptional()
   @IsInt()
@@ -61,6 +70,24 @@ export class CreateSaleDto {
   @IsOptional()
   @IsInt()
   paymentAccountId?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateSalePaymentDto)
+  payments?: CreateSalePaymentDto[];
+
+  @IsOptional()
+  @IsNumber()
+  paidAmount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  changeAmount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  dueAmount?: number;
 
   @IsOptional()
   @IsString()

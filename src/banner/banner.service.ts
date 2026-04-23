@@ -7,6 +7,8 @@ import { BannerType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateBannerDto } from './dto/create-banner.dto.js';
 import { UpdateBannerDto } from './dto/update-banner.dto.js';
+import { unlink } from 'fs/promises';
+import { join } from 'path';
 
 @Injectable()
 export class BannerService {
@@ -29,6 +31,39 @@ export class BannerService {
       throw new BadRequestException(
         `Maximum ${BannerService.MAX_HERO_SMALL} Hero Small banners allowed`,
       );
+    }
+  }
+
+  private toUploadsFsPath(url?: string | null): string | null {
+    if (!url) return null;
+    let pathPart = url.trim();
+    if (!pathPart) return null;
+
+    if (/^https?:\/\//i.test(pathPart)) {
+      try {
+        const parsed = new URL(pathPart);
+        pathPart = parsed.pathname || '';
+      } catch {
+        return null;
+      }
+    }
+
+    if (!pathPart.startsWith('/uploads/')) return null;
+
+    const decoded = decodeURIComponent(pathPart).replace(/\\/g, '/');
+    const relative = decoded.replace(/^\/+/, '');
+    if (relative.includes('..')) return null;
+
+    return join(process.cwd(), relative);
+  }
+
+  private async deleteUploadFile(url?: string | null) {
+    const path = this.toUploadsFsPath(url);
+    if (!path) return;
+    try {
+      await unlink(path);
+    } catch {
+      // Best-effort cleanup; ignore missing/locked files.
     }
   }
 
@@ -64,14 +99,20 @@ export class BannerService {
     const existing = await this.findOne(id);
     const targetType = dto.type ?? existing.type;
     await this.assertHeroSmallLimit(targetType, id);
-    return this.prisma.banner.update({
+    const updated = await this.prisma.banner.update({
       where: { id },
       data: dto,
     });
+    if (dto.image && dto.image !== existing.image) {
+      await this.deleteUploadFile(existing.image);
+    }
+    return updated;
   }
 
   async remove(id: number) {
-    await this.findOne(id);
-    return this.prisma.banner.delete({ where: { id } });
+    const existing = await this.findOne(id);
+    const deleted = await this.prisma.banner.delete({ where: { id } });
+    await this.deleteUploadFile(existing.image);
+    return deleted;
   }
 }
