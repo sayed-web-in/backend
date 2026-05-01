@@ -6,6 +6,8 @@ import {
   ValidateNested,
   ArrayMinSize,
   Min,
+  IsOptional,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -17,13 +19,20 @@ export class CreateOrderItemDto {
   @Min(1)
   quantity: number;
 
+  @ValidateIf((o: CreateOrderItemDto) => o.price == null)
   @IsNumber()
-  unitPrice: number;
+  unitPrice?: number;
+
+  @ValidateIf((o: CreateOrderItemDto) => o.unitPrice == null)
+  @IsNumber()
+  price?: number;
 }
 
 export class CreateOrderDto {
+  @IsOptional()
+  @Type(() => Number)
   @IsInt()
-  customerId: number;
+  customerId?: number;
 
   @IsString()
   name: string;

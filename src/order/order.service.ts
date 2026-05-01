@@ -6,7 +6,10 @@ import {
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
-import { CompleteOrderDto } from './dto/complete-order.dto.js';
+import {
+  CompleteOrderDto,
+  CompleteOrderImeiLineDto,
+} from './dto/complete-order.dto.js';
 import { OrderQueryDto } from './dto/order-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma, OrderStatus } from '@prisma/client';
@@ -31,6 +34,49 @@ export class OrderService {
     return this.prisma.$transaction(async (tx) => {
       const orderNumber = this.generateOrderNumber();
 
+      let customerId = dto.customerId;
+      if (customerId != null) {
+        const c = await tx.customer.findUnique({ where: { id: customerId } });
+        if (!c) throw new NotFoundException('Customer not found');
+        await tx.customer.update({
+          where: { id: customerId },
+          data: {
+            name: dto.name,
+            phone: String(dto.phone ?? '').trim(),
+            address: dto.address ?? c.address,
+            division: dto.division ?? c.division,
+            district: dto.district ?? c.district,
+          },
+        });
+      } else {
+        const phone = String(dto.phone ?? '').trim();
+        if (!phone) throw new BadRequestException('Phone is required');
+        const existing = await tx.customer.findFirst({ where: { phone } });
+        if (existing) {
+          await tx.customer.update({
+            where: { id: existing.id },
+            data: {
+              name: dto.name,
+              address: dto.address ?? existing.address,
+              division: dto.division ?? existing.division,
+              district: dto.district ?? existing.district,
+            },
+          });
+          customerId = existing.id;
+        } else {
+          const created = await tx.customer.create({
+            data: {
+              name: dto.name,
+              phone,
+              address: dto.address,
+              division: dto.division,
+              district: dto.district,
+            },
+          });
+          customerId = created.id;
+        }
+      }
+
       let totalAmount = new Prisma.Decimal(0);
       const itemsData: {
         storeProductId: number;
@@ -40,7 +86,13 @@ export class OrderService {
       }[] = [];
 
       for (const item of dto.items) {
-        const unitPrice = new Prisma.Decimal(item.unitPrice);
+        const rawUnit = item.unitPrice ?? item.price;
+        if (rawUnit == null || Number.isNaN(Number(rawUnit))) {
+          throw new BadRequestException(
+            'Each order line must include unitPrice or price',
+          );
+        }
+        const unitPrice = new Prisma.Decimal(rawUnit);
         const total = unitPrice.mul(item.quantity);
         totalAmount = totalAmount.add(total);
         itemsData.push({
@@ -54,7 +106,7 @@ export class OrderService {
       const order = await tx.order.create({
         data: {
           orderNumber,
-          customerId: dto.customerId,
+          customerId: customerId!,
           name: dto.name,
           phone: dto.phone,
           division: dto.division,
@@ -104,7 +156,11 @@ export class OrderService {
     const where: Prisma.OrderWhereInput = {};
     if (status) where.status = status;
     if (search) {
-      where.orderNumber = { contains: search };
+      where.OR = [
+        { orderNumber: { contains: search } },
+        { phone: { contains: search } },
+        { name: { contains: search } },
+      ];
     }
     if (dateFrom || dateTo) {
       where.createdAt = {};
@@ -136,6 +192,32 @@ export class OrderService {
     return paginate(data, total, page, limit);
   }
 
+  async findForCustomer(
+    customerId: number,
+    page: number = 1,
+    limit: number = 10,
+  ) {
+    const safeLimit = Math.min(Math.max(1, limit), 50);
+    const safePage = Math.max(1, page);
+    const skip = (safePage - 1) * safeLimit;
+    const where: Prisma.OrderWhereInput = { customerId };
+
+    const [data, total] = await Promise.all([
+      this.prisma.order.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: safeLimit,
+        include: {
+          items: { select: { id: true, quantity: true } },
+        },
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+
+    return paginate(data, total, safePage, safeLimit);
+  }
+
   async findOne(id: number) {
     const order = await this.prisma.order.findUnique({
       where: { id },
@@ -145,6 +227,7 @@ export class OrderService {
           include: {
             storeProduct: {
               include: {
+                branch: true,
                 product: {
                   include: {
                     images: { take: 1, orderBy: { sortOrder: 'asc' } },
@@ -201,15 +284,65 @@ export class OrderService {
   async completeOrder(id: number, dto: CompleteOrderDto) {
     const order = await this.prisma.order.findUnique({
       where: { id },
-      include: { items: true, sale: true },
+      include: {
+        items: {
+          include: {
+            storeProduct: {
+              include: {
+                product: { select: { hasImei: true } },
+              },
+            },
+          },
+        },
+        sale: true,
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
+
+    for (const item of order.items) {
+      if (item.storeProduct.branchId !== dto.branchId) {
+        throw new BadRequestException(
+          'All items must belong to the branch you select for fulfillment',
+        );
+      }
+    }
 
     if (order.sale) {
       throw new BadRequestException('Order already converted to a sale');
     }
     if (order.status === OrderStatus.CANCELLED) {
       throw new BadRequestException('Cannot complete a cancelled order');
+    }
+
+    const imeiByOrderItemId = new Map<number, CompleteOrderImeiLineDto>();
+    for (const line of dto.imeiLines ?? []) {
+      imeiByOrderItemId.set(line.orderItemId, line);
+    }
+
+    for (const item of order.items) {
+      const hasImei = item.storeProduct.product.hasImei;
+      const line = imeiByOrderItemId.get(item.id);
+      if (hasImei) {
+        if (!line) {
+          throw new BadRequestException(
+            `Order line ${item.id}: IMEI product requires serialNumbers in imeiLines`,
+          );
+        }
+        const serials = [
+          ...new Set(
+            line.serialNumbers.map((s) => String(s).trim()).filter(Boolean),
+          ),
+        ];
+        if (serials.length !== item.quantity) {
+          throw new BadRequestException(
+            `Order line ${item.id}: need exactly ${item.quantity} unique IMEI/serial value(s), got ${serials.length}`,
+          );
+        }
+      } else if (line?.serialNumbers?.length) {
+        throw new BadRequestException(
+          `Order line ${item.id}: serials were sent but product is not IMEI-tracked`,
+        );
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -239,8 +372,10 @@ export class OrderService {
 
       for (const item of order.items) {
         const itemTotal = item.unitPrice.mul(item.quantity);
+        const hasImei = item.storeProduct.product.hasImei;
+        const line = imeiByOrderItemId.get(item.id);
 
-        await tx.saleItem.create({
+        const saleItem = await tx.saleItem.create({
           data: {
             saleId: sale.id,
             storeProductId: item.storeProductId,
@@ -256,23 +391,70 @@ export class OrderService {
           data: { quantity: { decrement: item.quantity } },
         });
 
-        const batch = await tx.batch.findFirst({
-          where: {
-            storeProductId: item.storeProductId,
-            availableQty: { gt: 0 },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (batch) {
-          const deductQty = Math.min(batch.availableQty, item.quantity);
-          await tx.batch.update({
-            where: { id: batch.id },
-            data: {
-              availableQty: { decrement: deductQty },
-              soldQty: { increment: deductQty },
-            },
+        if (hasImei && line) {
+          const serials = [
+            ...new Set(
+              line.serialNumbers.map((s) => String(s).trim()).filter(Boolean),
+            ),
+          ];
+          const rows = await tx.serialNumber.findMany({
+            where: { serial: { in: serials } },
+            include: { batch: true },
           });
+          if (rows.length !== serials.length) {
+            throw new BadRequestException(
+              'One or more IMEI/serial numbers were not found',
+            );
+          }
+          const seen = new Set<string>();
+          for (const row of rows) {
+            if (row.status !== 'IN_STOCK') {
+              throw new BadRequestException(
+                `IMEI/serial ${row.serial} is not available (status: ${row.status})`,
+              );
+            }
+            if (row.batch.storeProductId !== item.storeProductId) {
+              throw new BadRequestException(
+                `IMEI/serial ${row.serial} does not belong to this store listing`,
+              );
+            }
+            if (seen.has(row.serial)) {
+              throw new BadRequestException(`Duplicate serial: ${row.serial}`);
+            }
+            seen.add(row.serial);
+
+            await tx.batch.update({
+              where: { id: row.batchId },
+              data: {
+                availableQty: { decrement: 1 },
+                soldQty: { increment: 1 },
+              },
+            });
+          }
+
+          await tx.serialNumber.updateMany({
+            where: { serial: { in: serials } },
+            data: { status: 'SOLD', saleItemId: saleItem.id },
+          });
+        } else {
+          const batch = await tx.batch.findFirst({
+            where: {
+              storeProductId: item.storeProductId,
+              availableQty: { gt: 0 },
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+
+          if (batch) {
+            const deductQty = Math.min(batch.availableQty, item.quantity);
+            await tx.batch.update({
+              where: { id: batch.id },
+              data: {
+                availableQty: { decrement: deductQty },
+                soldQty: { increment: deductQty },
+              },
+            });
+          }
         }
       }
 

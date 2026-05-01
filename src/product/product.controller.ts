@@ -57,6 +57,12 @@ export class ProductController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('store/:id/available-serials')
+  getAvailableSerials(@Param('id', ParseIntPipe) id: number) {
+    return this.productService.getAvailableSerialsForStoreProduct(id);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Patch('store-products/:storeProductId')
   updateStoreProduct(
     @Param('storeProductId', ParseIntPipe) storeProductId: number,

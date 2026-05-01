@@ -1,4 +1,23 @@
-import { IsInt, IsOptional, IsString } from 'class-validator';
+import {
+  IsInt,
+  IsOptional,
+  IsString,
+  IsArray,
+  ValidateNested,
+  ArrayMinSize,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+/** Per line: pick IMEI/serial strings that will be sold when completing the order. */
+export class CompleteOrderImeiLineDto {
+  @IsInt()
+  orderItemId: number;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  serialNumbers: string[];
+}
 
 export class CompleteOrderDto {
   @IsInt()
@@ -11,4 +30,11 @@ export class CompleteOrderDto {
   @IsOptional()
   @IsInt()
   paymentAccountId?: number;
+
+  /** Required for order lines whose product has IMEI tracking. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CompleteOrderImeiLineDto)
+  imeiLines?: CompleteOrderImeiLineDto[];
 }

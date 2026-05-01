@@ -1011,6 +1011,30 @@ export class ProductService {
     });
   }
 
+  /** IN_STOCK serials for ecommerce order fulfillment / POS-style sellout. */
+  async getAvailableSerialsForStoreProduct(storeProductId: number) {
+    const sp = await this.prisma.storeProduct.findUnique({
+      where: { id: storeProductId },
+      include: { product: { select: { hasImei: true, name: true } } },
+    });
+    if (!sp) throw new NotFoundException('Store product not found');
+
+    const serials = await this.prisma.serialNumber.findMany({
+      where: {
+        status: 'IN_STOCK',
+        batch: { storeProductId },
+      },
+      select: { id: true, serial: true },
+      orderBy: { id: 'asc' },
+    });
+
+    return {
+      hasImei: sp.product.hasImei,
+      productName: sp.product.name,
+      serials,
+    };
+  }
+
   async getSitemapProducts() {
     return this.prisma.product.findMany({
       where: { status: 'ACTIVE', isArchived: false },

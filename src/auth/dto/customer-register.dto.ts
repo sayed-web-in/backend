@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsString, Matches, MinLength } from 'class-validator';
 
 export class CustomerRegisterDto {
   @IsString()
@@ -8,6 +8,7 @@ export class CustomerRegisterDto {
   email: string;
 
   @IsString()
+  @Matches(/^\d{11}$/, { message: 'Phone must be exactly 11 digits' })
   phone: string;
 
   @IsString()
