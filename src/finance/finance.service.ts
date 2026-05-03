@@ -1,7 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateAccountDto } from './dto/create-account.dto.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
+import { TransferFundsDto } from './dto/transfer-funds.dto.js';
 import { CreateExpenseCategoryDto } from './dto/create-expense-category.dto.js';
 import { CreateExpenseDto } from './dto/create-expense.dto.js';
 import { CreateIncomeCategoryDto } from './dto/create-income-category.dto.js';
@@ -165,6 +170,75 @@ export class FinanceService {
       });
 
       return transaction;
+    });
+  }
+
+  async transferFunds(dto: TransferFundsDto) {
+    if (dto.fromAccountId === dto.toAccountId) {
+      throw new BadRequestException(
+        'Source and destination accounts must be different',
+      );
+    }
+
+    const decAmount = new Prisma.Decimal(dto.amount);
+    if (decAmount.lte(0)) {
+      throw new BadRequestException('Amount must be greater than zero');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const from = await tx.account.findUnique({
+        where: { id: dto.fromAccountId },
+      });
+      const to = await tx.account.findUnique({
+        where: { id: dto.toAccountId },
+      });
+      if (!from || !to) {
+        throw new NotFoundException('Account not found');
+      }
+
+      const available = new Prisma.Decimal(from.balance);
+      if (available.lessThan(decAmount)) {
+        throw new BadRequestException(
+          'Insufficient balance in the source account',
+        );
+      }
+
+      const ref =
+        dto.reference?.trim() ||
+        `TRF-${Date.now().toString(36).toUpperCase()}`;
+      const note = dto.description?.trim();
+      const debitDesc = note || `Transfer to ${to.name}`;
+      const creditDesc = note || `Transfer from ${from.name}`;
+
+      await tx.transaction.create({
+        data: {
+          accountId: dto.fromAccountId,
+          type: 'DEBIT',
+          amount: decAmount,
+          reference: ref,
+          description: debitDesc,
+        },
+      });
+      await tx.account.update({
+        where: { id: dto.fromAccountId },
+        data: { balance: { decrement: decAmount } },
+      });
+
+      await tx.transaction.create({
+        data: {
+          accountId: dto.toAccountId,
+          type: 'CREDIT',
+          amount: decAmount,
+          reference: ref,
+          description: creditDesc,
+        },
+      });
+      await tx.account.update({
+        where: { id: dto.toAccountId },
+        data: { balance: { increment: decAmount } },
+      });
+
+      return { reference: ref };
     });
   }
 

@@ -778,7 +778,191 @@ export class ReportService {
 
   // ─── 13. PROFIT & LOSS REPORT ────────────────────────────────
 
+  private monthBounds(year: number, monthIndex: number) {
+    return {
+      gte: new Date(year, monthIndex, 1, 0, 0, 0, 0),
+      lte: new Date(year, monthIndex + 1, 0, 23, 59, 59, 999),
+    };
+  }
+
+  /** Monthly P&L matrix (same shape as seller-admin profit-loss report). */
+  private async profitLossYearlyMatrix(year: number, branchId?: number) {
+    const branchWhere =
+      branchId != null && Number.isFinite(branchId)
+        ? { branchId: Math.floor(branchId) }
+        : {};
+
+    const monthLabels = Array.from({ length: 12 }, (_, m) =>
+      new Date(year, m, 1).toLocaleString('en-US', { month: 'short' }),
+    );
+
+    const z = () => Array.from({ length: 12 }, () => 0);
+    const posSales = z();
+    const wholesaleSales = z();
+    const quickSellSales = z();
+    const totalSales = z();
+    const serviceIncome = z();
+    const othersIncome = z();
+    const returnGain = z();
+    const totalIncome = z();
+    const grossProfit = z();
+    const cogs = z();
+    const salesReturn = z();
+    const salaryWages = z();
+    const otherOperatingExpenses = z();
+    const totalExpense = z();
+    const netProfit = z();
+
+    const [expenseCategories, incomeCategories] = await Promise.all([
+      this.prisma.expenseCategory.findMany({ select: { id: true, name: true } }),
+      this.prisma.incomeCategory.findMany({ select: { id: true, name: true } }),
+    ]);
+    const salaryCatIds = expenseCategories
+      .filter((c) => /salary|wage|payroll|stipend/i.test(c.name))
+      .map((c) => c.id);
+    const serviceIncomeCatIds = incomeCategories
+      .filter((c) => /service/i.test(c.name))
+      .map((c) => c.id);
+
+    for (let m = 0; m < 12; m++) {
+      const { gte, lte } = this.monthBounds(year, m);
+      const saleWhere = { createdAt: { gte, lte }, ...branchWhere };
+      const purchaseWhere = { createdAt: { gte, lte }, ...branchWhere };
+      const dateInMonth = { gte, lte };
+      const saleReturnWhere: Prisma.SaleReturnWhereInput = {
+        createdAt: dateInMonth,
+        ...(branchId != null && Number.isFinite(branchId)
+          ? { sale: { branchId: Math.floor(branchId) } }
+          : {}),
+      };
+
+      const [saleAgg, purchaseAgg, saleReturnAgg] = await Promise.all([
+        this.prisma.sale.aggregate({
+          where: saleWhere,
+          _sum: { grandTotal: true },
+        }),
+        this.prisma.purchase.aggregate({
+          where: purchaseWhere,
+          _sum: { grandTotal: true },
+        }),
+        this.prisma.saleReturn.aggregate({
+          where: saleReturnWhere,
+          _sum: { totalAmount: true },
+        }),
+      ]);
+
+      let salSum = 0;
+      let otherExpSum = 0;
+      if (salaryCatIds.length) {
+        const [a, b] = await Promise.all([
+          this.prisma.expense.aggregate({
+            where: {
+              date: dateInMonth,
+              categoryId: { in: salaryCatIds },
+            },
+            _sum: { amount: true },
+          }),
+          this.prisma.expense.aggregate({
+            where: {
+              date: dateInMonth,
+              categoryId: { notIn: salaryCatIds },
+            },
+            _sum: { amount: true },
+          }),
+        ]);
+        salSum = Number(a._sum.amount ?? 0);
+        otherExpSum = Number(b._sum.amount ?? 0);
+      } else {
+        const allExp = await this.prisma.expense.aggregate({
+          where: { date: dateInMonth },
+          _sum: { amount: true },
+        });
+        otherExpSum = Number(allExp._sum.amount ?? 0);
+      }
+
+      let svcInc = 0;
+      let othInc = 0;
+      if (serviceIncomeCatIds.length) {
+        const [a, b] = await Promise.all([
+          this.prisma.income.aggregate({
+            where: {
+              date: dateInMonth,
+              categoryId: { in: serviceIncomeCatIds },
+            },
+            _sum: { amount: true },
+          }),
+          this.prisma.income.aggregate({
+            where: {
+              date: dateInMonth,
+              categoryId: { notIn: serviceIncomeCatIds },
+            },
+            _sum: { amount: true },
+          }),
+        ]);
+        svcInc = Number(a._sum.amount ?? 0);
+        othInc = Number(b._sum.amount ?? 0);
+      } else {
+        const allInc = await this.prisma.income.aggregate({
+          where: { date: dateInMonth },
+          _sum: { amount: true },
+        });
+        othInc = Number(allInc._sum.amount ?? 0);
+      }
+
+      posSales[m] = Number(saleAgg._sum.grandTotal ?? 0);
+      wholesaleSales[m] = 0;
+      quickSellSales[m] = 0;
+      totalSales[m] = posSales[m] + wholesaleSales[m] + quickSellSales[m];
+      serviceIncome[m] = svcInc;
+      othersIncome[m] = othInc;
+      returnGain[m] = 0;
+      totalIncome[m] =
+        totalSales[m] + serviceIncome[m] + othersIncome[m];
+      cogs[m] = Number(purchaseAgg._sum.grandTotal ?? 0);
+      salesReturn[m] = Number(saleReturnAgg._sum.totalAmount ?? 0);
+      salaryWages[m] = salSum;
+      otherOperatingExpenses[m] = otherExpSum;
+      totalExpense[m] =
+        cogs[m] +
+        salesReturn[m] +
+        salaryWages[m] +
+        otherOperatingExpenses[m];
+      grossProfit[m] = totalIncome[m] - cogs[m];
+      netProfit[m] = totalIncome[m] - totalExpense[m];
+    }
+
+    return {
+      year,
+      branchId: branchId ?? null,
+      monthLabels,
+      data: {
+        posSales,
+        wholesaleSales,
+        quickSellSales,
+        totalSales,
+        serviceIncome,
+        othersIncome,
+        returnGain,
+        totalIncome,
+        grossProfit,
+        cogs,
+        salesReturn,
+        salaryWages,
+        otherOperatingExpenses,
+        totalExpense,
+        netProfit,
+      },
+    };
+  }
+
   async profitLossReport(query: ReportQueryDto) {
+    if (query.year != null) {
+      const y = Math.floor(Number(query.year));
+      if (!Number.isNaN(y) && y >= 2000 && y <= 2100) {
+        return this.profitLossYearlyMatrix(y, query.branchId);
+      }
+    }
+
     const dateWhere = this.dateRange(query);
     const expDateWhere = this.dateFieldRange('date', query);
     const incDateWhere = this.dateFieldRange('date', query);

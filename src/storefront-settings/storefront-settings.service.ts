@@ -7,6 +7,13 @@ import {
 } from '@prisma/client';
 import { UpsertStorefrontSettingsDto } from './dto/upsert-storefront-settings.dto.js';
 
+const defaultMarketing = () => ({
+  gtmContainerId: '',
+  publicSiteUrl: '',
+  gtmCurrency: 'BDT',
+  metaPixelId: '',
+});
+
 @Injectable()
 export class StorefrontSettingsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -29,11 +36,18 @@ export class StorefrontSettingsService {
       footer = await tx.footerConfig.create({ data: {} });
     }
 
-    return { topBar, header, footer };
+    let marketing = await tx.storefrontMarketingConfig.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    if (!marketing) {
+      marketing = await tx.storefrontMarketingConfig.create({ data: {} });
+    }
+
+    return { topBar, header, footer, marketing };
   }
 
   async getPublicSettings() {
-    const [topBar, header, footer] = await Promise.all([
+    const [topBar, header, footer, marketing] = await Promise.all([
       this.prisma.topBarConfig.findFirst({
         orderBy: { id: 'asc' },
         include: {
@@ -52,6 +66,9 @@ export class StorefrontSettingsService {
             orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
           },
         },
+      }),
+      this.prisma.storefrontMarketingConfig.findFirst({
+        orderBy: { id: 'asc' },
       }),
     ]);
 
@@ -73,12 +90,20 @@ export class StorefrontSettingsService {
         customerLinks:
           footer?.links.filter((x) => x.section === FooterLinkSection.CUSTOMER) ?? [],
       },
+      marketing: marketing
+        ? {
+            gtmContainerId: marketing.gtmContainerId,
+            publicSiteUrl: marketing.publicSiteUrl,
+            gtmCurrency: marketing.gtmCurrency,
+            metaPixelId: marketing.metaPixelId,
+          }
+        : defaultMarketing(),
     };
   }
 
   async upsert(dto: UpsertStorefrontSettingsDto) {
     await this.prisma.$transaction(async (tx) => {
-      const { topBar, header, footer } = await this.ensureBaseRows(tx);
+      const { topBar, header, footer, marketing } = await this.ensureBaseRows(tx);
 
       await tx.topBarConfig.update({
         where: { id: topBar.id },
@@ -147,6 +172,31 @@ export class StorefrontSettingsService {
         if (links.length) {
           await tx.footerLink.createMany({ data: links });
         }
+      }
+
+      const mData: {
+        gtmContainerId?: string;
+        publicSiteUrl?: string;
+        gtmCurrency?: string;
+        metaPixelId?: string;
+      } = {};
+      if (dto.marketingGtmContainerId !== undefined) {
+        mData.gtmContainerId = dto.marketingGtmContainerId;
+      }
+      if (dto.marketingPublicSiteUrl !== undefined) {
+        mData.publicSiteUrl = dto.marketingPublicSiteUrl;
+      }
+      if (dto.marketingGtmCurrency !== undefined) {
+        mData.gtmCurrency = dto.marketingGtmCurrency;
+      }
+      if (dto.marketingMetaPixelId !== undefined) {
+        mData.metaPixelId = dto.marketingMetaPixelId;
+      }
+      if (Object.keys(mData).length > 0) {
+        await tx.storefrontMarketingConfig.update({
+          where: { id: marketing.id },
+          data: mData,
+        });
       }
     });
 

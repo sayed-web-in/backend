@@ -20,6 +20,7 @@ import {
   StoreProductQueryDto,
   DraftProductQueryDto,
 } from './dto/product-query.dto.js';
+import { PriceListQueryDto } from './dto/price-list-query.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 
 @Controller('products')
@@ -95,6 +96,12 @@ export class ProductController {
   @Get('low-stock')
   getLowStock(@Query() query: StoreProductQueryDto) {
     return this.productService.getLowStock(query);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('price-list')
+  getPriceList(@Query() query: PriceListQueryDto) {
+    return this.productService.getPriceList(query);
   }
 
   @Get('sitemap')

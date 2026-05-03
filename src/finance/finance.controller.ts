@@ -13,6 +13,7 @@ import {
 import { FinanceService } from './finance.service.js';
 import { CreateAccountDto } from './dto/create-account.dto.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
+import { TransferFundsDto } from './dto/transfer-funds.dto.js';
 import { CreateExpenseCategoryDto } from './dto/create-expense-category.dto.js';
 import { CreateExpenseDto } from './dto/create-expense.dto.js';
 import { CreateIncomeCategoryDto } from './dto/create-income-category.dto.js';
@@ -62,6 +63,11 @@ export class FinanceController {
   @Post('transactions')
   createTransaction(@Body() dto: CreateTransactionDto) {
     return this.financeService.createTransaction(dto);
+  }
+
+  @Post('transactions/transfer')
+  transferFunds(@Body() dto: TransferFundsDto) {
+    return this.financeService.transferFunds(dto);
   }
 
   // ─── EXPENSE CATEGORIES ────────────────────────────────────

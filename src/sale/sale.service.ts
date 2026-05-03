@@ -9,6 +9,7 @@ import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
+import { ProductTransactionQueryDto } from './dto/product-transaction-query.dto.js';
 import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import type { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
@@ -701,6 +702,185 @@ export class SaleService {
       }
     }
     return map;
+  }
+
+  async getProductTransactions(query: ProductTransactionQueryDto) {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 25;
+    const skip = (page - 1) * limit;
+
+    const ot = (query.orderType || '').trim().toLowerCase();
+    if (ot === 'quick_sell' || ot === 'wholesale') {
+      return {
+        data: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 1,
+      };
+    }
+
+    const start = new Date(query.startDate);
+    const end = new Date(query.endDate);
+
+    const saleWhere: Prisma.SaleWhereInput = {
+      status: { not: 'RETURNED' },
+      createdAt: { gte: start, lte: end },
+    };
+    if (query.branchId != null && Number.isFinite(query.branchId)) {
+      saleWhere.branchId = query.branchId;
+    }
+
+    const where: Prisma.SaleItemWhereInput = { sale: saleWhere };
+
+    const [total, items] = await Promise.all([
+      this.prisma.saleItem.count({ where }),
+      this.prisma.saleItem.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ sale: { createdAt: 'desc' } }, { id: 'desc' }],
+        include: {
+          sale: { include: { branch: true } },
+          storeProduct: {
+            include: {
+              product: {
+                include: { category: true, brand: true },
+              },
+              productVariant: {
+                include: {
+                  attributes: {
+                    include: {
+                      attributeValue: { include: { attribute: true } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const storeProductIds = [
+      ...new Set(items.map((i) => i.storeProductId)),
+    ] as number[];
+
+    const costAggs =
+      storeProductIds.length > 0
+        ? await this.prisma.batch.groupBy({
+            by: ['storeProductId'],
+            where: { storeProductId: { in: storeProductIds } },
+            _avg: { purchaseCost: true },
+          })
+        : [];
+
+    const costByStore = new Map<number, number>();
+    for (const row of costAggs) {
+      costByStore.set(
+        row.storeProductId,
+        Number(row._avg.purchaseCost ?? 0),
+      );
+    }
+
+    const saleIds = [...new Set(items.map((i) => i.saleId))];
+    const salesForSum =
+      saleIds.length > 0
+        ? await this.prisma.sale.findMany({
+            where: { id: { in: saleIds } },
+            select: {
+              id: true,
+              grandTotal: true,
+              items: { select: { total: true } },
+            },
+          })
+        : [];
+
+    const lineSumBySale = new Map<number, Prisma.Decimal>();
+    for (const s of salesForSum) {
+      let sum = new Prisma.Decimal(0);
+      for (const it of s.items) {
+        sum = sum.add(it.total);
+      }
+      lineSumBySale.set(s.id, sum);
+    }
+
+    const data = items.map((row) => {
+      const sale = row.sale;
+      const sp = row.storeProduct;
+      const product = sp.product;
+      const variant = sp.productVariant;
+
+      const qty = row.quantity;
+      const unitPrice = Number(row.unitPrice);
+      const lineSub = Number(row.total);
+      const costPrice = costByStore.get(sp.id) ?? 0;
+      const costLine = qty * costPrice;
+
+      const sumLines = lineSumBySale.get(sale.id) ?? new Prisma.Decimal(0);
+      const grandTotal = new Prisma.Decimal(sale.grandTotal);
+      const lineDec = new Prisma.Decimal(row.total);
+      const netRevenueDec = sumLines.gt(0)
+        ? grandTotal.mul(lineDec).div(sumLines)
+        : lineDec;
+      const netRevenue = Number(netRevenueDec);
+      const netProfit = netRevenue - costLine;
+
+      const attrs = variant?.attributes?.map((a) => ({
+        attribute: { name: a.attributeValue.attribute.name },
+        attributeValue: { value: a.attributeValue.value },
+      }));
+
+      return {
+        id: String(row.id),
+        productName: product.name,
+        sku: product.sku || variant?.sku || '',
+        quantity: qty,
+        unitPrice,
+        costPrice,
+        totalPrice: lineSub,
+        lineSubtotal: lineSub,
+        netRevenue,
+        netProfit,
+        saleOrder: {
+          id: String(sale.id),
+          invoiceNo: sale.invoiceNumber,
+          orderNo: sale.invoiceNumber,
+          orderType: 'pos',
+          orderDate: sale.createdAt.toISOString(),
+          grandTotal: Number(sale.grandTotal),
+          servicesTotal: 0,
+          branch: sale.branch
+            ? { id: String(sale.branch.id), name: sale.branch.name }
+            : undefined,
+        },
+        product: {
+          sellerCategory: product.category
+            ? { id: String(product.category.id), name: product.category.name }
+            : null,
+          sellerBrand: product.brand
+            ? { id: String(product.brand.id), name: product.brand.name }
+            : null,
+        },
+        variant: variant
+          ? {
+              id: String(variant.id),
+              sku: variant.sku,
+              attributes: attrs,
+            }
+          : undefined,
+      };
+    });
+
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages,
+    };
   }
 
   async searchBySerial(serial: string) {

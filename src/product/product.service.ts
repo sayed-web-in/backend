@@ -13,6 +13,7 @@ import {
   StoreProductQueryDto,
   DraftProductQueryDto,
 } from './dto/product-query.dto.js';
+import { PriceListQueryDto } from './dto/price-list-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
 import { Prisma, ProductType, ProductStatus } from '@prisma/client';
 import { unlink } from 'fs/promises';
@@ -905,6 +906,195 @@ export class ProductService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async getPriceList(query: PriceListQueryDto) {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 15;
+    const skip = (page - 1) * limit;
+
+    const productWhere: Prisma.ProductWhereInput = {
+      status: 'ACTIVE',
+      isArchived: false,
+    };
+    if (query.categoryId) productWhere.categoryId = query.categoryId;
+    if (query.brandId) productWhere.brandId = query.brandId;
+    if (query.search?.trim()) {
+      const s = query.search.trim();
+      productWhere.OR = [
+        { name: { contains: s } },
+        { sku: { contains: s } },
+        { variants: { some: { sku: { contains: s } } } },
+      ];
+    }
+
+    const whereBase: Prisma.StoreProductWhereInput = {
+      isActive: true,
+      product: productWhere,
+    };
+    if (query.branchId != null && Number.isFinite(query.branchId)) {
+      whereBase.branchId = query.branchId;
+    }
+
+    const lite = await this.prisma.storeProduct.findMany({
+      where: whereBase,
+      select: {
+        id: true,
+        productId: true,
+        branchId: true,
+        quantity: true,
+        quantityAlert: true,
+        sellingPrice: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let filtered = lite;
+    const st = query.stockStatus?.trim();
+    if (st === 'in_stock') {
+      filtered = lite.filter((x) => x.quantity > 0);
+    } else if (st === 'out_of_stock') {
+      filtered = lite.filter((x) => x.quantity === 0);
+    } else if (st === 'low_stock') {
+      filtered = lite.filter(
+        (x) => x.quantity > 0 && x.quantity <= x.quantityAlert,
+      );
+    }
+
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const pageSlice = filtered.slice(skip, skip + limit);
+    const idList = pageSlice.map((x) => x.id);
+
+    const allIds = filtered.map((x) => x.id);
+    const costAggAll =
+      allIds.length > 0
+        ? await this.prisma.batch.groupBy({
+            by: ['storeProductId'],
+            where: { storeProductId: { in: allIds } },
+            _avg: { purchaseCost: true },
+          })
+        : [];
+    const costMapAll = new Map(
+      costAggAll.map((c) => [
+        c.storeProductId,
+        Number(c._avg.purchaseCost ?? 0),
+      ]),
+    );
+
+    let totalPurchaseValue = 0;
+    let totalSellingValue = 0;
+    const distinctProducts = new Set<number>();
+    for (const row of filtered) {
+      distinctProducts.add(row.productId);
+      const c = costMapAll.get(row.id) ?? 0;
+      totalPurchaseValue += row.quantity * c;
+      totalSellingValue += row.quantity * Number(row.sellingPrice);
+    }
+
+    if (idList.length === 0) {
+      return {
+        items: [] as Record<string, unknown>[],
+        total,
+        totalPages,
+        page,
+        limit,
+        stats: {
+          totalItems: total,
+          totalProducts: distinctProducts.size,
+          totalPurchaseValue,
+          totalSellingValue,
+        },
+      };
+    }
+
+    const costAggPage = await this.prisma.batch.groupBy({
+      by: ['storeProductId'],
+      where: { storeProductId: { in: idList } },
+      _avg: { purchaseCost: true },
+    });
+    const costMapPage = new Map(
+      costAggPage.map((c) => [
+        c.storeProductId,
+        Number(c._avg.purchaseCost ?? 0),
+      ]),
+    );
+
+    const fullRows = await this.prisma.storeProduct.findMany({
+      where: { id: { in: idList } },
+      include: {
+        product: {
+          include: {
+            category: true,
+            brand: true,
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          },
+        },
+        productVariant: {
+          include: {
+            attributes: {
+              include: {
+                attributeValue: { include: { attribute: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const orderMap = new Map(idList.map((id, i) => [id, i]));
+    fullRows.sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
+
+    const items = fullRows.map((sp) => {
+      const p = sp.product;
+      const v = sp.productVariant;
+      const attrs = v?.attributes
+        ?.map((a) => a.attributeValue?.value)
+        .filter((x): x is string => Boolean(x && String(x).trim()));
+      const variantDisplay = attrs?.length
+        ? attrs.join(', ')
+        : v?.sku || p.sku || '';
+      const sku = v?.sku || p.sku || '';
+      const purchasePrice = costMapPage.get(sp.id) ?? 0;
+      const productType =
+        p.type === 'VARIABLE' ? 'variable' : 'single';
+      const productImage = p.images?.[0]?.url ?? '';
+
+      return {
+        id: String(sp.id),
+        productId: String(p.id),
+        variantId: v ? String(v.id) : '0',
+        priceId: String(sp.id),
+        productName: p.name,
+        productType,
+        productImage,
+        productCreatedAt: p.createdAt.toISOString(),
+        categoryId: p.categoryId != null ? String(p.categoryId) : null,
+        brandId: p.brandId != null ? String(p.brandId) : null,
+        variantDisplay,
+        sku,
+        stockQuantity: sp.quantity,
+        lowStockThreshold: sp.quantityAlert,
+        purchasePrice,
+        sellingPrice: Number(sp.sellingPrice),
+        branchId: String(sp.branchId),
+      };
+    });
+
+    return {
+      items,
+      total,
+      totalPages,
+      page,
+      limit,
+      stats: {
+        totalItems: total,
+        totalProducts: distinctProducts.size,
+        totalPurchaseValue,
+        totalSellingValue,
+      },
+    };
   }
 
   async getDraftProducts(query: DraftProductQueryDto) {

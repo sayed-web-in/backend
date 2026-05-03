@@ -99,4 +99,24 @@ export class UpsertStorefrontSettingsDto {
   @IsString()
   @MaxLength(255)
   copyrightText?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  marketingGtmContainerId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  marketingPublicSiteUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  marketingGtmCurrency?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  marketingMetaPixelId?: string;
 }

@@ -1,4 +1,4 @@
-import { IsOptional, IsDateString, IsInt } from 'class-validator';
+import { IsOptional, IsDateString, IsInt, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 import { PaginationDto } from '../../common/pagination.dto.js';
 
@@ -15,4 +15,12 @@ export class ReportQueryDto extends PaginationDto {
   @Type(() => Number)
   @IsInt()
   branchId?: number;
+
+  /** When set (with optional branchId), profit-loss returns a monthly matrix for that year (storefront-style). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(2000)
+  @Max(2100)
+  year?: number;
 }

@@ -913,6 +913,18 @@ model FooterLink {
   @@map("footer_links")
 }
 
+model StorefrontMarketingConfig {
+  id             Int      @id @default(autoincrement())
+  gtmContainerId String   @default("") @db.VarChar(24)
+  publicSiteUrl  String   @default("") @db.VarChar(512)
+  gtmCurrency    String   @default("BDT") @db.VarChar(12)
+  metaPixelId    String   @default("") @db.VarChar(64)
+  createdAt      DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("storefront_marketing_configs")
+}
+
 model StoreLocation {
   id           Int      @id @default(autoincrement())
   name         String

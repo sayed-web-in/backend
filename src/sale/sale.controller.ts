@@ -16,6 +16,7 @@ import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
+import { ProductTransactionQueryDto } from './dto/product-transaction-query.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 
 @Controller('sales')
@@ -52,6 +53,11 @@ export class SaleController {
   @Get('pay-later')
   getPayLaterSales(@Query() query: PayLaterQueryDto) {
     return this.saleService.getPayLaterSales(query);
+  }
+
+  @Get('product-transactions')
+  getProductTransactions(@Query() query: ProductTransactionQueryDto) {
+    return this.saleService.getProductTransactions(query);
   }
 
   @Get('serial/:serial')
