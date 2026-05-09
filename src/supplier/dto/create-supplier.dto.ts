@@ -1,4 +1,5 @@
-import { IsString, IsOptional, IsEmail, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsEmail, IsBoolean, IsNumber, Min } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateSupplierDto {
   @IsString()
@@ -23,4 +24,11 @@ export class CreateSupplierDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /** Opening supplier prepayment balance (optional). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  advanceBalance?: number;
 }

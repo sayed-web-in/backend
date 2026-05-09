@@ -10,6 +10,15 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
+export class PurchasePaymentRowDto {
+  @IsInt()
+  accountId: number;
+
+  @IsNumber()
+  @Min(0.01)
+  amount: number;
+}
+
 export class CreatePurchaseItemDto {
   @IsInt()
   storeProductId: number;
@@ -49,6 +58,10 @@ export class CreatePurchaseDto {
   @IsNumber()
   tax?: number;
 
+  @IsOptional()
+  @IsNumber()
+  shippingCost?: number;
+
   @IsString()
   paymentMethod: string;
 
@@ -56,8 +69,20 @@ export class CreatePurchaseDto {
   @IsInt()
   paymentAccountId?: number;
 
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PurchasePaymentRowDto)
+  payments?: PurchasePaymentRowDto[];
+
   @IsNumber()
   paidAmount: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  advanceApplied?: number;
 
   @IsOptional()
   @IsString()

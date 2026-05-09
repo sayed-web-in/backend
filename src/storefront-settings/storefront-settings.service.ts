@@ -85,6 +85,7 @@ export class StorefrontSettingsService {
           copyrightText: '',
           links: [],
         }),
+        description: footer?.description ?? '',
         quickLinks:
           footer?.links.filter((x) => x.section === FooterLinkSection.QUICK) ?? [],
         customerLinks:
@@ -125,7 +126,7 @@ export class StorefrontSettingsService {
       await tx.footerConfig.update({
         where: { id: footer.id },
         data: {
-          description: dto.footerDescription ?? footer.description,
+          description: dto.footerDescription ?? footer.description ?? '',
           address: dto.footerAddress ?? footer.address,
           phone: dto.footerPhone ?? footer.phone,
           email: dto.footerEmail ?? footer.email,

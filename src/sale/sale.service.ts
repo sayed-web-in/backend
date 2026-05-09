@@ -4,6 +4,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { bdDayEndUtc, bdDayStartUtc } from '../common/bd-time.js';
 import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
@@ -37,19 +38,65 @@ export class SaleService {
 
       const discount = new Prisma.Decimal(dto.discount ?? 0);
       const tax = new Prisma.Decimal(dto.tax ?? 0);
-      const grandTotal = totalAmount.sub(discount).add(tax);
+      const servicesTotal = new Prisma.Decimal(dto.servicesTotal ?? 0);
+      if (servicesTotal.lessThan(0)) {
+        throw new BadRequestException('servicesTotal cannot be negative');
+      }
+      const grandTotal = totalAmount.sub(discount).add(tax).add(servicesTotal);
 
       const status = dto.status ?? 'COMPLETED';
-      const requestedPaid = new Prisma.Decimal(dto.paidAmount ?? grandTotal);
-      const grossPaid =
-        status === 'PAY_LATER' ? new Prisma.Decimal(0) : requestedPaid;
-      const changeAmount = grossPaid.sub(grandTotal).greaterThan(0)
-        ? grossPaid.sub(grandTotal)
+      let advanceDec = new Prisma.Decimal(dto.advanceApplied ?? 0);
+      if (advanceDec.lessThan(0)) advanceDec = new Prisma.Decimal(0);
+
+      if (advanceDec.greaterThan(0) && !dto.customerId) {
+        throw new BadRequestException(
+          'customerId is required when applying customer advance',
+        );
+      }
+
+      const totalCashGross =
+        status === 'PAY_LATER'
+          ? new Prisma.Decimal(0)
+          : new Prisma.Decimal(dto.paidAmount ?? 0);
+
+      if (advanceDec.greaterThan(0)) {
+        const cust = await tx.customer.findUnique({
+          where: { id: dto.customerId! },
+          select: { totalAdvance: true },
+        });
+        if (!cust) throw new NotFoundException('Customer not found');
+        const advBal = new Prisma.Decimal(cust.totalAdvance);
+        if (advanceDec.sub(advBal).greaterThan(0.02)) {
+          throw new BadRequestException(
+            `advanceApplied cannot exceed customer advance balance (${advBal.toFixed(2)})`,
+          );
+        }
+        if (advanceDec.sub(grandTotal).greaterThan(0.02)) {
+          throw new BadRequestException(
+            'advanceApplied cannot exceed sale grand total',
+          );
+        }
+      }
+
+      const totalPaid = advanceDec.add(totalCashGross);
+      const changeAmount = totalPaid.sub(grandTotal).greaterThan(0)
+        ? totalPaid.sub(grandTotal)
         : new Prisma.Decimal(0);
-      const paidAmount = grossPaid.sub(changeAmount);
-      const dueAmount = grandTotal.sub(paidAmount).greaterThan(0)
-        ? grandTotal.sub(paidAmount)
+      const dueAmount = grandTotal.sub(totalPaid).greaterThan(0)
+        ? grandTotal.sub(totalPaid)
         : new Prisma.Decimal(0);
+      const paidAmount = grandTotal.sub(dueAmount);
+
+      let effectiveStatus = status;
+      if (status === 'PAY_LATER' && dueAmount.lte(0)) {
+        effectiveStatus = 'COMPLETED';
+      }
+
+      let saleNote = dto.note?.trim() || null;
+      if (advanceDec.greaterThan(0)) {
+        const advNote = `Advance: ${advanceDec.toFixed(2)}`;
+        saleNote = saleNote ? `${saleNote} | ${advNote}` : advNote;
+      }
 
       const sale = await tx.sale.create({
         data: {
@@ -60,15 +107,24 @@ export class SaleService {
           discount,
           tax,
           grandTotal,
+          servicesTotal,
           paidAmount,
+          advanceApplied: advanceDec,
           changeAmount,
           dueAmount,
           paymentMethod: dto.paymentMethod,
           paymentAccountId: dto.paymentAccountId,
-          status,
-          note: dto.note,
+          status: effectiveStatus,
+          note: saleNote,
         },
       });
+
+      if (advanceDec.greaterThan(0)) {
+        await tx.customer.update({
+          where: { id: dto.customerId! },
+          data: { totalAdvance: { decrement: advanceDec } },
+        });
+      }
 
       for (const item of dto.items) {
         const itemDiscount = new Prisma.Decimal(item.discount ?? 0);
@@ -119,8 +175,7 @@ export class SaleService {
         }
       }
 
-      if (status === 'COMPLETED') {
-        const netReceived = paidAmount;
+      if (effectiveStatus === 'COMPLETED') {
         const providedPayments = Array.isArray(dto.payments)
           ? dto.payments
               .map((p) => ({
@@ -131,10 +186,8 @@ export class SaleService {
           : [];
 
         if (providedPayments.length > 0) {
-          let remaining = netReceived;
           for (const p of providedPayments) {
-            if (remaining.lte(0)) break;
-            const alloc = Prisma.Decimal.min(remaining, new Prisma.Decimal(p.amount));
+            const alloc = new Prisma.Decimal(p.amount);
             if (alloc.lte(0)) continue;
 
             await tx.transaction.create({
@@ -151,15 +204,13 @@ export class SaleService {
               where: { id: p.accountId },
               data: { balance: { increment: alloc } },
             });
-
-            remaining = remaining.sub(alloc);
           }
-        } else if (dto.paymentAccountId) {
+        } else if (dto.paymentAccountId && totalCashGross.greaterThan(0)) {
           await tx.transaction.create({
             data: {
               accountId: dto.paymentAccountId,
               type: 'CREDIT',
-              amount: netReceived,
+              amount: totalCashGross,
               reference: invoiceNumber,
               description: `Sale payment - ${invoiceNumber}`,
             },
@@ -167,7 +218,7 @@ export class SaleService {
 
           await tx.account.update({
             where: { id: dto.paymentAccountId },
-            data: { balance: { increment: netReceived } },
+            data: { balance: { increment: totalCashGross } },
           });
         }
       }
@@ -340,8 +391,8 @@ export class SaleService {
     }
     if (dateFrom || dateTo) {
       where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
+      if (dateFrom) where.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.createdAt.lte = bdDayEndUtc(dateTo);
     }
     return where;
   }
@@ -367,8 +418,8 @@ export class SaleService {
     }
     if (dateFrom || dateTo) {
       const range: any = {};
-      if (dateFrom) range.gte = new Date(dateFrom);
-      if (dateTo) range.lte = new Date(dateTo);
+      if (dateFrom) range.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) range.lte = bdDayEndUtc(dateTo);
       parts.push({ createdAt: range });
     }
     if (parts.length === 0) return {};
@@ -398,6 +449,7 @@ export class SaleService {
         include: {
           customer: true,
           branch: true,
+          order: { select: { id: true, orderNumber: true } },
           _count: { select: { items: true } },
         },
       }),
@@ -499,6 +551,7 @@ export class SaleService {
       include: {
         customer: true,
         branch: true,
+        order: { select: { id: true, orderNumber: true } },
         paymentAccount: true,
         items: {
           include: {
@@ -708,17 +761,6 @@ export class SaleService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 25;
     const skip = (page - 1) * limit;
-
-    const ot = (query.orderType || '').trim().toLowerCase();
-    if (ot === 'quick_sell' || ot === 'wholesale') {
-      return {
-        data: [],
-        total: 0,
-        page,
-        limit,
-        totalPages: 1,
-      };
-    }
 
     const start = new Date(query.startDate);
     const end = new Date(query.endDate);

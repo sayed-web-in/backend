@@ -13,6 +13,7 @@ import {
 import { OrderQueryDto } from './dto/order-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma, OrderStatus } from '@prisma/client';
+import { bdDayEndUtc, bdDayStartUtc } from '../common/bd-time.js';
 
 @Injectable()
 export class OrderService {
@@ -164,8 +165,8 @@ export class OrderService {
     }
     if (dateFrom || dateTo) {
       where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
+      if (dateFrom) where.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     const orderBy: any = {};

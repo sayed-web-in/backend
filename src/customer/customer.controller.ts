@@ -14,6 +14,7 @@ import { CustomerService } from './customer.service.js';
 import { CreateCustomerDto } from './dto/create-customer.dto.js';
 import { UpdateCustomerDto } from './dto/update-customer.dto.js';
 import { QuickTransactionDto } from './dto/quick-transaction.dto.js';
+import { CreateCustomerTransactionDto } from './dto/create-customer-transaction.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { PaginationDto } from '../common/pagination.dto.js';
 
@@ -37,14 +38,19 @@ export class CustomerController {
     return this.customerService.getDueCustomers(query);
   }
 
-  @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.customerService.findOne(id);
-  }
-
   @Get(':id/stats')
   getStats(@Param('id', ParseIntPipe) id: number) {
     return this.customerService.getCustomerStats(id);
+  }
+
+  @Get(':id/transactions')
+  listCustomerTransactions(@Param('id', ParseIntPipe) id: number) {
+    return this.customerService.listCustomerTransactions(id);
+  }
+
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.customerService.findOne(id);
   }
 
   @Post()
@@ -71,5 +77,23 @@ export class CustomerController {
     @Body() dto: QuickTransactionDto,
   ) {
     return this.customerService.addQuickTransaction(id, dto);
+  }
+
+  @Post(':id/transactions')
+  createCustomerTransaction(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCustomerTransactionDto,
+  ) {
+    return this.customerService
+      .createCustomerTransaction(id, dto)
+      .then((data) => ({ data }));
+  }
+
+  @Delete(':id/transactions/:txId')
+  deleteCustomerTransaction(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('txId', ParseIntPipe) txId: number,
+  ) {
+    return this.customerService.deleteCustomerTransaction(id, txId);
   }
 }

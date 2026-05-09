@@ -15,41 +15,61 @@ import { CreateTaxRateDto } from './dto/create-tax-rate.dto.js';
 import { FinanceQueryDto } from './dto/finance-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
+import {
+  bdDayEndUtc,
+  bdDayStartUtc,
+  yearMonthKeyBd,
+} from '../common/bd-time.js';
 
 @Injectable()
 export class FinanceService {
   constructor(private prisma: PrismaService) {}
 
   private expenseWhereFromQuery(query: FinanceQueryDto) {
-    const { categoryId, dateFrom, dateTo, search } = query;
+    const { categoryId, branchId, dateFrom, dateTo, search } = query;
     const where: any = {};
     if (categoryId) where.categoryId = categoryId;
+    if (branchId != null && Number.isFinite(branchId)) {
+      where.branchId = Math.floor(Number(branchId));
+    }
     if (dateFrom || dateTo) {
       where.date = {};
-      if (dateFrom) where.date.gte = new Date(dateFrom);
-      if (dateTo) where.date.lte = new Date(dateTo);
+      if (dateFrom) where.date.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.date.lte = bdDayEndUtc(dateTo);
     }
     if (search) {
       where.OR = [
         { note: { contains: search } },
+        { name: { contains: search } },
+        { reference: { contains: search } },
         { category: { name: { contains: search } } },
       ];
     }
     return where;
   }
 
+  private expenseDateFromYmd(d?: string): Date {
+    if (!d) return new Date();
+    return bdDayStartUtc(d.slice(0, 10));
+  }
+
   private incomeWhereFromQuery(query: FinanceQueryDto) {
-    const { categoryId, dateFrom, dateTo, search } = query;
+    const { categoryId, branchId, dateFrom, dateTo, search } = query;
     const where: any = {};
     if (categoryId) where.categoryId = categoryId;
+    if (branchId != null && Number.isFinite(branchId)) {
+      where.branchId = Math.floor(Number(branchId));
+    }
     if (dateFrom || dateTo) {
       where.date = {};
-      if (dateFrom) where.date.gte = new Date(dateFrom);
-      if (dateTo) where.date.lte = new Date(dateTo);
+      if (dateFrom) where.date.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.date.lte = bdDayEndUtc(dateTo);
     }
     if (search) {
       where.OR = [
         { note: { contains: search } },
+        { name: { contains: search } },
+        { reference: { contains: search } },
         { category: { name: { contains: search } } },
       ];
     }
@@ -66,12 +86,16 @@ export class FinanceService {
   }
 
   async createAccount(dto: CreateAccountDto) {
+    const opening = new Prisma.Decimal(
+      dto.openingBalance ?? dto.balance ?? 0,
+    );
     return this.prisma.account.create({
       data: {
         name: dto.name,
         accountNumber: dto.accountNumber,
         type: dto.type,
-        balance: dto.balance ?? 0,
+        openingBalance: opening,
+        balance: opening,
         isActive: dto.isActive ?? true,
       },
     });
@@ -80,7 +104,26 @@ export class FinanceService {
   async updateAccount(id: number, dto: Partial<CreateAccountDto>) {
     const account = await this.prisma.account.findUnique({ where: { id } });
     if (!account) throw new NotFoundException('Account not found');
-    return this.prisma.account.update({ where: { id }, data: dto });
+
+    const data: Prisma.AccountUpdateInput = {};
+
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.accountNumber !== undefined)
+      data.accountNumber = dto.accountNumber;
+    if (dto.type !== undefined) data.type = dto.type;
+    if (dto.isActive !== undefined) data.isActive = dto.isActive;
+
+    if (dto.openingBalance !== undefined) {
+      const newOp = new Prisma.Decimal(dto.openingBalance);
+      const oldOp = new Prisma.Decimal(account.openingBalance);
+      const delta = newOp.sub(oldOp);
+      data.openingBalance = newOp;
+      data.balance = new Prisma.Decimal(account.balance).add(delta);
+    } else if (dto.balance !== undefined) {
+      data.balance = new Prisma.Decimal(dto.balance);
+    }
+
+    return this.prisma.account.update({ where: { id }, data });
   }
 
   async deleteAccount(id: number) {
@@ -116,8 +159,8 @@ export class FinanceService {
     }
     if (dateFrom || dateTo) {
       where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
+      if (dateFrom) where.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     const orderBy: any = {};
@@ -308,7 +351,11 @@ export class FinanceService {
         skip,
         take: limit,
         orderBy,
-        include: { category: true },
+        include: {
+          category: true,
+          branch: true,
+          account: { select: { id: true, name: true, type: true } },
+        },
       }),
       this.prisma.expense.count({ where }),
     ]);
@@ -317,7 +364,9 @@ export class FinanceService {
   }
 
   async getExpenseSummary(query: FinanceQueryDto) {
-    const where = this.expenseWhereFromQuery(query);
+    const where: any = {
+      AND: [this.expenseWhereFromQuery(query), { status: 'active' }],
+    };
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(
@@ -354,31 +403,67 @@ export class FinanceService {
   }
 
   async createExpense(dto: CreateExpenseDto) {
+    const name = dto.name?.trim();
+    if (!name) {
+      throw new BadRequestException('Expense name is required');
+    }
+    if (dto.branchId == null || !Number.isFinite(dto.branchId)) {
+      throw new BadRequestException('Branch is required');
+    }
+
+    const statusNorm = (dto.status || 'active').trim().toLowerCase();
+    const postToAccount = statusNorm === 'active';
+
+    if (postToAccount) {
+      if (!dto.accountId) {
+        throw new BadRequestException(
+          'Account is required when status is Active — amount debits that account',
+        );
+      }
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const expense = await tx.expense.create({
         data: {
+          branchId: Math.floor(Number(dto.branchId)),
           categoryId: dto.categoryId,
-          accountId: dto.accountId,
+          accountId: postToAccount ? dto.accountId! : (dto.accountId ?? null),
+          name,
+          reference: dto.reference?.trim() || null,
+          status: statusNorm,
           amount: dto.amount,
-          note: dto.note,
-          date: dto.date ? new Date(dto.date) : new Date(),
+          note: dto.note?.trim() || null,
+          date: this.expenseDateFromYmd(dto.date),
         },
-        include: { category: true },
+        include: {
+          category: true,
+          branch: true,
+          account: { select: { id: true, name: true, type: true } },
+        },
       });
 
-      if (dto.accountId) {
+      if (postToAccount && dto.accountId) {
         const account = await tx.account.findUnique({
           where: { id: dto.accountId },
         });
         if (!account) throw new NotFoundException('Account not found');
+        if (!account.isActive) {
+          throw new BadRequestException('Account is inactive');
+        }
+
+        const label =
+          name ||
+          dto.note?.trim() ||
+          expense.category?.name ||
+          'Expense';
 
         await tx.transaction.create({
           data: {
             accountId: dto.accountId,
             type: 'DEBIT',
             amount: dto.amount,
-            reference: `EXP-${expense.id}`,
-            description: `Expense: ${dto.note || 'No description'}`,
+            reference: dto.reference?.trim() || `EXP-${expense.id}`,
+            description: label,
           },
         });
 
@@ -399,21 +484,67 @@ export class FinanceService {
     const data: any = {};
     if (dto.categoryId !== undefined) data.categoryId = dto.categoryId;
     if (dto.accountId !== undefined) data.accountId = dto.accountId;
+    if (dto.branchId !== undefined) {
+      data.branchId =
+        dto.branchId != null && Number.isFinite(dto.branchId)
+          ? Math.floor(Number(dto.branchId))
+          : null;
+    }
     if (dto.amount !== undefined) data.amount = dto.amount;
-    if (dto.note !== undefined) data.note = dto.note;
-    if (dto.date !== undefined) data.date = new Date(dto.date);
+    if (dto.note !== undefined) data.note = dto.note?.trim() || null;
+    if (dto.name !== undefined) data.name = dto.name?.trim() || null;
+    if (dto.reference !== undefined) {
+      data.reference = dto.reference?.trim() || null;
+    }
+    if (dto.status !== undefined) {
+      data.status = dto.status.trim().toLowerCase() || 'active';
+    }
+    if (dto.date !== undefined) data.date = this.expenseDateFromYmd(dto.date);
 
     return this.prisma.expense.update({
       where: { id },
       data,
-      include: { category: true },
+      include: {
+        category: true,
+        branch: true,
+        account: { select: { id: true, name: true, type: true } },
+      },
     });
   }
 
   async deleteExpense(id: number) {
     const expense = await this.prisma.expense.findUnique({ where: { id } });
     if (!expense) throw new NotFoundException('Expense not found');
-    return this.prisma.expense.delete({ where: { id } });
+
+    const wasActive =
+      (expense.status || 'active').toLowerCase() === 'active' &&
+      expense.accountId != null;
+
+    return this.prisma.$transaction(async (tx) => {
+      if (wasActive) {
+        const account = await tx.account.findUnique({
+          where: { id: expense.accountId! },
+        });
+        if (account) {
+          await tx.transaction.create({
+            data: {
+              accountId: expense.accountId!,
+              type: 'CREDIT',
+              amount: expense.amount,
+              reference: `EXP-REV-${id}`,
+              description: `Reversal: deleted expense #${id}`,
+            },
+          });
+          await tx.account.update({
+            where: { id: expense.accountId! },
+            data: {
+              balance: { increment: new Prisma.Decimal(expense.amount) },
+            },
+          });
+        }
+      }
+      return tx.expense.delete({ where: { id } });
+    });
   }
 
   // ─── INCOME CATEGORIES ────────────────────────────────────
@@ -482,7 +613,11 @@ export class FinanceService {
         skip,
         take: limit,
         orderBy,
-        include: { category: true },
+        include: {
+          category: true,
+          branch: true,
+          account: { select: { id: true, name: true, type: true } },
+        },
       }),
       this.prisma.income.count({ where }),
     ]);
@@ -491,7 +626,9 @@ export class FinanceService {
   }
 
   async getIncomeSummary(query: FinanceQueryDto) {
-    const where = this.incomeWhereFromQuery(query);
+    const where: any = {
+      AND: [this.incomeWhereFromQuery(query), { status: 'active' }],
+    };
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(
@@ -528,31 +665,51 @@ export class FinanceService {
   }
 
   async createIncome(dto: CreateIncomeDto) {
+    const statusNorm = (dto.status || 'active').trim().toLowerCase();
+    const postToAccount = statusNorm === 'active';
+
     return this.prisma.$transaction(async (tx) => {
       const income = await tx.income.create({
         data: {
+          branchId: dto.branchId ?? null,
           categoryId: dto.categoryId,
-          accountId: dto.accountId,
+          accountId: dto.accountId ?? null,
+          name: dto.name?.trim() || null,
           amount: dto.amount,
-          note: dto.note,
+          note: dto.note?.trim() || null,
+          reference: dto.reference?.trim() || null,
+          status: statusNorm,
           date: dto.date ? new Date(dto.date) : new Date(),
         },
-        include: { category: true },
+        include: {
+          category: true,
+          branch: true,
+          account: { select: { id: true, name: true, type: true } },
+        },
       });
 
-      if (dto.accountId) {
+      if (postToAccount && dto.accountId) {
         const account = await tx.account.findUnique({
           where: { id: dto.accountId },
         });
         if (!account) throw new NotFoundException('Account not found');
+        if (!account.isActive) {
+          throw new BadRequestException('Account is inactive');
+        }
+
+        const label =
+          dto.name?.trim() ||
+          dto.note?.trim() ||
+          income.category?.name ||
+          'Income';
 
         await tx.transaction.create({
           data: {
             accountId: dto.accountId,
             type: 'CREDIT',
             amount: dto.amount,
-            reference: `INC-${income.id}`,
-            description: `Income: ${dto.note || 'No description'}`,
+            reference: dto.reference?.trim() || `INC-${income.id}`,
+            description: label,
           },
         });
 
@@ -573,14 +730,23 @@ export class FinanceService {
     const data: any = {};
     if (dto.categoryId !== undefined) data.categoryId = dto.categoryId;
     if (dto.accountId !== undefined) data.accountId = dto.accountId;
+    if (dto.branchId !== undefined) data.branchId = dto.branchId;
     if (dto.amount !== undefined) data.amount = dto.amount;
-    if (dto.note !== undefined) data.note = dto.note;
+    if (dto.note !== undefined) data.note = dto.note?.trim() || null;
+    if (dto.name !== undefined) data.name = dto.name?.trim() || null;
+    if (dto.reference !== undefined) data.reference = dto.reference?.trim() || null;
+    if (dto.status !== undefined)
+      data.status = dto.status.trim().toLowerCase() || 'active';
     if (dto.date !== undefined) data.date = new Date(dto.date);
 
     return this.prisma.income.update({
       where: { id },
       data,
-      include: { category: true },
+      include: {
+        category: true,
+        branch: true,
+        account: { select: { id: true, name: true, type: true } },
+      },
     });
   }
 
@@ -632,8 +798,8 @@ export class FinanceService {
     const where: any = {};
     if (dateFrom || dateTo) {
       where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
+      if (dateFrom) where.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     const transactions = await this.prisma.transaction.findMany({
@@ -650,7 +816,7 @@ export class FinanceService {
     > = {};
 
     for (const txn of transactions) {
-      const monthKey = `${txn.createdAt.getFullYear()}-${String(txn.createdAt.getMonth() + 1).padStart(2, '0')}`;
+      const monthKey = yearMonthKeyBd(txn.createdAt);
 
       if (!monthlyBreakdown[monthKey]) {
         monthlyBreakdown[monthKey] = {
@@ -697,8 +863,8 @@ export class FinanceService {
     const where: any = { accountId };
     if (dateFrom || dateTo) {
       where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = new Date(dateFrom);
-      if (dateTo) where.createdAt.lte = new Date(dateTo);
+      if (dateFrom) where.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) where.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     // Get balance before the date range for opening balance
@@ -708,7 +874,7 @@ export class FinanceService {
         where: {
           accountId,
           type: 'CREDIT',
-          createdAt: { lt: new Date(dateFrom) },
+          createdAt: { lt: bdDayStartUtc(dateFrom) },
         },
         _sum: { amount: true },
       });
@@ -716,7 +882,7 @@ export class FinanceService {
         where: {
           accountId,
           type: 'DEBIT',
-          createdAt: { lt: new Date(dateFrom) },
+          createdAt: { lt: bdDayStartUtc(dateFrom) },
         },
         _sum: { amount: true },
       });
@@ -753,8 +919,8 @@ export class FinanceService {
     const dateFilter: any = {};
     if (dateFrom || dateTo) {
       dateFilter.createdAt = {};
-      if (dateFrom) dateFilter.createdAt.gte = new Date(dateFrom);
-      if (dateTo) dateFilter.createdAt.lte = new Date(dateTo);
+      if (dateFrom) dateFilter.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) dateFilter.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     // Revenue: sum of sales grandTotal
@@ -777,11 +943,11 @@ export class FinanceService {
     const grossProfit = revenue.sub(cogs);
 
     // Operating Expenses
-    const expenseDateFilter: any = {};
+    const expenseDateFilter: any = { status: 'active' };
     if (dateFrom || dateTo) {
       expenseDateFilter.date = {};
-      if (dateFrom) expenseDateFilter.date.gte = new Date(dateFrom);
-      if (dateTo) expenseDateFilter.date.lte = new Date(dateTo);
+      if (dateFrom) expenseDateFilter.date.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) expenseDateFilter.date.lte = bdDayEndUtc(dateTo);
     }
 
     const expenseResult = await this.prisma.expense.aggregate({

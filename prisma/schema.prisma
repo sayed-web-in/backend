@@ -42,14 +42,42 @@ model Customer {
   division     String?
   district     String?
   totalAdvance Decimal   @default(0) @db.Decimal(12, 2)
+  /** Non-invoice due (seller-style “Customer Due” quick payments). */
+  manualDue    Decimal   @default(0) @db.Decimal(12, 2)
   googleId     String?   @unique
   password     String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   orders       Order[]
   sales        Sale[]
+  transactions CustomerTransaction[]
 
   @@map("customers")
+}
+
+enum CustomerTransactionType {
+  PAYMENT
+  ADVANCE
+  DUE
+}
+
+model CustomerTransaction {
+  id              Int                     @id @default(autoincrement())
+  customerId      Int
+  type            CustomerTransactionType
+  amount          Decimal                 @db.Decimal(12, 2)
+  accountId       Int
+  saleId          Int?
+  note            String?                 @db.Text
+  transactionDate DateTime
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  customer        Customer                @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  account         Account                 @relation(fields: [accountId], references: [id])
+  sale            Sale?                   @relation(fields: [saleId], references: [id])
+
+  @@index([customerId])
+  @@map("customer_transactions")
 }
 
 // ─── BRANCH ──────────────────────────────────────────────────
@@ -71,6 +99,8 @@ model Branch {
   transfersTo    StockTransfer[]  @relation("TransferTo")
   categories     CategoryBranch[]
   brands         BrandBranch[]
+  incomes        Income[]
+  expenses       Expense[]
 
   @@map("branches")
 }
@@ -363,20 +393,52 @@ enum SerialStatus {
 // ─── SUPPLIER ────────────────────────────────────────────────
 
 model Supplier {
-  id          Int              @id @default(autoincrement())
-  name        String
-  email       String?
-  phone       String?
-  company     String?
-  address     String?          @db.Text
-  totalDue    Decimal          @default(0) @db.Decimal(12, 2)
-  isActive    Boolean          @default(true)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  batches     Batch[]
-  purchases   Purchase[]
+  id              Int                    @id @default(autoincrement())
+  name            String
+  email           String?
+  phone           String?
+  company         String?
+  address         String?                @db.Text
+  totalDue        Decimal                @default(0) @db.Decimal(12, 2)
+  /** Prepayment held from supplier; applied on purchase like seller-admin. */
+  advanceBalance  Decimal                @default(0) @db.Decimal(12, 2)
+  isActive        Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  batches         Batch[]
+  purchases       Purchase[]
+  transactions    SupplierTransaction[]
 
   @@map("suppliers")
+}
+
+enum SupplierTransactionType {
+  PAYMENT
+  ADVANCE
+  REFUND
+  ADJUSTMENT
+  DUE
+}
+
+model SupplierTransaction {
+  id                      Int                       @id @default(autoincrement())
+  supplierId              Int
+  type                    SupplierTransactionType
+  amount                  Decimal                   @db.Decimal(12, 2)
+  accountId               Int?
+  offsetsOpeningInventory Boolean                   @default(false)
+  invoiceNo               String?
+  purchaseId              Int?
+  note                    String?                   @db.Text
+  transactionDate         DateTime
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  supplier                Supplier                  @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  account                 Account?                  @relation(fields: [accountId], references: [id])
+  purchase                Purchase?                 @relation(fields: [purchaseId], references: [id])
+
+  @@index([supplierId])
+  @@map("supplier_transactions")
 }
 
 // ─── SALES ───────────────────────────────────────────────────
@@ -390,7 +452,11 @@ model Sale {
   discount        Decimal      @default(0) @db.Decimal(12, 2)
   tax             Decimal      @default(0) @db.Decimal(12, 2)
   grandTotal      Decimal      @db.Decimal(12, 2)
+  /** POS applied services total (non-inventory); included in grandTotal. Shown under P&L Service Income. */
+  servicesTotal   Decimal      @default(0) @db.Decimal(12, 2)
   paidAmount      Decimal      @db.Decimal(12, 2)
+  /** Customer wallet applied on this sale (seller-admin / POS). */
+  advanceApplied  Decimal      @default(0) @db.Decimal(12, 2)
   changeAmount    Decimal      @default(0) @db.Decimal(12, 2)
   dueAmount       Decimal      @default(0) @db.Decimal(12, 2)
   paymentMethod   String       @default("cash")
@@ -402,10 +468,11 @@ model Sale {
   updatedAt       DateTime     @updatedAt
   customer        Customer?    @relation(fields: [customerId], references: [id])
   branch          Branch       @relation(fields: [branchId], references: [id])
-  paymentAccount  Account?     @relation(fields: [paymentAccountId], references: [id])
-  order           Order?       @relation(fields: [orderId], references: [id])
-  items           SaleItem[]
-  returns         SaleReturn[]
+  paymentAccount       Account?                @relation(fields: [paymentAccountId], references: [id])
+  order                Order?                  @relation(fields: [orderId], references: [id])
+  items                SaleItem[]
+  returns              SaleReturn[]
+  customerTransactions CustomerTransaction[]
 
   @@map("sales")
 }
@@ -466,9 +533,11 @@ model Purchase {
   totalAmount     Decimal          @db.Decimal(12, 2)
   discount        Decimal          @default(0) @db.Decimal(12, 2)
   tax             Decimal          @default(0) @db.Decimal(12, 2)
+  shippingCost    Decimal          @default(0) @db.Decimal(12, 2)
   grandTotal      Decimal          @db.Decimal(12, 2)
   paidAmount      Decimal          @db.Decimal(12, 2)
   dueAmount       Decimal          @default(0) @db.Decimal(12, 2)
+  advanceApplied  Decimal          @default(0) @db.Decimal(12, 2)
   paymentMethod   String           @default("cash")
   paymentAccountId Int?
   status          PurchaseStatus   @default(RECEIVED)
@@ -478,8 +547,9 @@ model Purchase {
   supplier        Supplier?        @relation(fields: [supplierId], references: [id])
   branch          Branch           @relation(fields: [branchId], references: [id])
   paymentAccount  Account?         @relation(fields: [paymentAccountId], references: [id])
-  items           PurchaseItem[]
-  returns         PurchaseReturn[]
+  items                PurchaseItem[]
+  returns              PurchaseReturn[]
+  supplierTransactions SupplierTransaction[]
 
   @@map("purchases")
 }
@@ -648,17 +718,23 @@ model StockTransferItem {
 // ─── FINANCE & ACCOUNTS ─────────────────────────────────────
 
 model Account {
-  id           Int           @id @default(autoincrement())
-  name         String
-  accountNumber String?
-  type         AccountType
-  balance      Decimal       @default(0) @db.Decimal(14, 2)
-  isActive     Boolean       @default(true)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  transactions Transaction[]
-  sales        Sale[]
-  purchases    Purchase[]
+  id              Int           @id @default(autoincrement())
+  name            String
+  accountNumber   String?
+  type            AccountType
+  /** Initial / opening amount (seller-admin style); current balance changes with transactions. */
+  openingBalance  Decimal       @default(0) @db.Decimal(14, 2)
+  balance         Decimal       @default(0) @db.Decimal(14, 2)
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  transactions         Transaction[]
+  sales                Sale[]
+  purchases            Purchase[]
+  supplierTransactions SupplierTransaction[]
+  customerTransactions CustomerTransaction[]
+  incomes              Income[]
+  expenses             Expense[]
 
   @@map("accounts")
 }
@@ -700,14 +776,21 @@ model ExpenseCategory {
 
 model Expense {
   id         Int             @id @default(autoincrement())
+  branchId   Int?
   categoryId Int
   accountId  Int?
+  name       String?
+  reference  String?
+  /** active = posted to account & counted in P&L; pending/cancelled = record only */
+  status     String          @default("active")
   amount     Decimal         @db.Decimal(12, 2)
   note       String?         @db.Text
   date       DateTime        @default(now())
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @updatedAt
   category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+  branch     Branch?         @relation(fields: [branchId], references: [id])
+  account    Account?        @relation(fields: [accountId], references: [id])
 
   @@map("expenses")
 }
@@ -725,14 +808,22 @@ model IncomeCategory {
 
 model Income {
   id         Int            @id @default(autoincrement())
+  branchId   Int?
   categoryId Int
   accountId  Int?
+  /** Short title (seller-admin style). */
+  name       String?        @db.VarChar(255)
   amount     Decimal        @db.Decimal(12, 2)
   note       String?        @db.Text
+  reference  String?        @db.VarChar(191)
+  /** active | pending | cancelled */
+  status     String         @default("active") @db.VarChar(32)
   date       DateTime       @default(now())
   createdAt  DateTime       @default(now())
   updatedAt  DateTime       @updatedAt
+  branch     Branch?        @relation(fields: [branchId], references: [id])
   category   IncomeCategory @relation(fields: [categoryId], references: [id])
+  account    Account?       @relation(fields: [accountId], references: [id])
 
   @@map("incomes")
 }
@@ -884,7 +975,7 @@ model HeaderBrandConfig {
 
 model FooterConfig {
   id              Int          @id @default(autoincrement())
-  description     String       @default("") @db.Text
+  description     String?      @db.Text
   address         String       @default("")
   phone           String       @default("")
   email           String       @default("")

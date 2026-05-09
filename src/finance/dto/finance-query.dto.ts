@@ -15,6 +15,11 @@ export class FinanceQueryDto extends PaginationDto {
   categoryId?: number;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  branchId?: number;
+
+  @IsOptional()
   @IsEnum(TransactionType)
   type?: TransactionType;
 

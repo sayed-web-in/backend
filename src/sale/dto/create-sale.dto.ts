@@ -89,6 +89,12 @@ export class CreateSaleDto {
   @IsNumber()
   dueAmount?: number;
 
+  /** Customer advance/wallet applied to this sale (cash stays in `paidAmount` / `payments` only). */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  advanceApplied?: number;
+
   @IsOptional()
   @IsString()
   note?: string;
@@ -96,4 +102,11 @@ export class CreateSaleDto {
   @IsOptional()
   @IsEnum(SaleStatus)
   status?: SaleStatus;
+
+  /** POS service add-ons (same as admin POS `appliedServices` total). Added to grandTotal. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  servicesTotal?: number;
 }

@@ -1,4 +1,7 @@
 import 'dotenv/config';
+
+process.env.TZ = process.env.TZ || 'Asia/Dhaka';
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 import { ValidationPipe } from '@nestjs/common';
