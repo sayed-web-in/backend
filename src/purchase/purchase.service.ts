@@ -427,7 +427,187 @@ export class PurchaseService {
       },
     });
     if (!purchase) throw new NotFoundException('Purchase not found');
-    return purchase;
+
+    const [supplierTxns, accountTxns, batches] = await Promise.all([
+      this.prisma.supplierTransaction.findMany({
+        where: { purchaseId: id },
+        include: {
+          account: {
+            select: { id: true, name: true, accountNumber: true },
+          },
+        },
+        orderBy: { transactionDate: 'desc' },
+      }),
+      this.prisma.transaction.findMany({
+        where: { reference: purchase.referenceNo },
+        include: {
+          account: {
+            select: { id: true, name: true, accountNumber: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      (async () => {
+        const spIds = [...new Set(purchase.items.map((i) => i.storeProductId))];
+        if (spIds.length === 0) return [];
+        const windowMs = 120_000;
+        const t0 = new Date(purchase.createdAt.getTime() - windowMs);
+        const t1 = new Date(purchase.createdAt.getTime() + windowMs);
+        const whereBatch: any = {
+          storeProductId: { in: spIds },
+          batchType: 'purchase',
+          createdAt: { gte: t0, lte: t1 },
+        };
+        if (purchase.supplierId != null) {
+          whereBatch.supplierId = purchase.supplierId;
+        }
+        return this.prisma.batch.findMany({
+          where: whereBatch,
+          include: { serialNumbers: true },
+          orderBy: { id: 'asc' },
+        });
+      })(),
+    ]);
+
+    const serialsByItemId = this.allocateSerialsToPurchaseLines(
+      purchase.items,
+      batches,
+    );
+
+    const paymentHistory = [
+      ...accountTxns.map((t) => ({
+        id: `acct-${t.id}`,
+        source: 'account' as const,
+        paymentDate: t.createdAt.toISOString(),
+        amount: Number(t.amount),
+        paymentMethod: null as string | null,
+        transactionId: t.reference,
+        note: t.description,
+        account: t.account
+          ? {
+              accountName: t.account.name,
+              accountNumber: t.account.accountNumber,
+            }
+          : null,
+      })),
+      ...supplierTxns.map((st) => ({
+        id: `sup-${st.id}`,
+        source: 'supplier' as const,
+        paymentDate: st.transactionDate.toISOString(),
+        amount: Number(st.amount),
+        paymentMethod: String(st.type),
+        transactionId: st.invoiceNo ?? `ST-${st.id}`,
+        note: st.note,
+        account: st.account
+          ? {
+              accountName: st.account.name,
+              accountNumber: st.account.accountNumber,
+            }
+          : null,
+      })),
+    ].sort(
+      (a, b) =>
+        new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime(),
+    );
+
+    const returnedMap = await this.getReturnedQtyByStoreProductForPurchase(id);
+    const sortedLines = [...purchase.items].sort((a, b) => a.id - b.id);
+    const remLeft = new Map<number, number>();
+    for (const spId of new Set(purchase.items.map((i) => i.storeProductId))) {
+      remLeft.set(spId, returnedMap.get(spId) ?? 0);
+    }
+    const availByItemId = new Map<number, number>();
+    for (const it of sortedLines) {
+      const rem = remLeft.get(it.storeProductId) ?? 0;
+      const used = Math.min(it.quantity, rem);
+      availByItemId.set(it.id, Math.max(0, it.quantity - used));
+      remLeft.set(it.storeProductId, rem - used);
+    }
+
+    const items = purchase.items.map((it) => {
+      const serialObjs = serialsByItemId.get(it.id) ?? [];
+      const availableSerials = serialObjs
+        .filter((s) => s.status === 'IN_STOCK')
+        .map((s) => s.serial);
+      return {
+        ...it,
+        serialNumbers: serialObjs,
+        availableSerials,
+        availableReturnQty: availByItemId.get(it.id) ?? it.quantity,
+      };
+    });
+
+    return { ...purchase, items, paymentHistory };
+  }
+
+  /** Sum return quantities already posted against this purchase, per store product. */
+  private async getReturnedQtyByStoreProductForPurchase(
+    purchaseId: number,
+  ): Promise<Map<number, number>> {
+    const rows = await this.prisma.purchaseReturnItem.findMany({
+      where: { purchaseReturn: { purchaseId } },
+      select: { storeProductId: true, quantity: true },
+    });
+    const m = new Map<number, number>();
+    for (const r of rows) {
+      m.set(r.storeProductId, (m.get(r.storeProductId) ?? 0) + r.quantity);
+    }
+    return m;
+  }
+
+  private composePurchaseReturnReason(dto: CreatePurchaseReturnDto): string | null {
+    const blocks: string[] = [];
+    if (dto.returnDate?.trim()) blocks.push(`Return date: ${dto.returnDate.trim()}`);
+    if (dto.reference?.trim()) blocks.push(`Reference: ${dto.reference.trim()}`);
+    if (dto.responsiblePerson?.trim()) {
+      blocks.push(`Responsible: ${dto.responsiblePerson.trim()}`);
+    }
+    if (dto.notes?.trim()) blocks.push(`Notes: ${dto.notes.trim()}`);
+    dto.items.forEach((it, idx) => {
+      if (it.returnType) {
+        blocks.push(
+          `Line ${idx + 1} (store product #${it.storeProductId}): ${it.returnType}`,
+        );
+      }
+    });
+    if (dto.reason?.trim()) blocks.push(dto.reason.trim());
+    const s = blocks.join('\n').trim();
+    return s.length ? s : null;
+  }
+
+  /**
+   * Map IMEI/serial rows from purchase-time batches (same transaction window) onto line items.
+   */
+  private allocateSerialsToPurchaseLines(
+    items: { id: number; storeProductId: number; quantity: number }[],
+    batches: Array<{
+      storeProductId: number;
+      serialNumbers: { serial: string; status: string }[];
+    }>,
+  ): Map<number, { serial: string; status: string }[]> {
+    const batchRemaining = batches.map((b) => ({
+      storeProductId: b.storeProductId,
+      serials: (b.serialNumbers ?? []).map((s) => ({
+        serial: s.serial,
+        status: String(s.status),
+      })),
+    }));
+    const serialsByItemId = new Map<number, { serial: string; status: string }[]>();
+    const sortedItems = [...items].sort((a, b) => a.id - b.id);
+    for (const item of sortedItems) {
+      let need = item.quantity;
+      const list: { serial: string; status: string }[] = [];
+      for (const b of batchRemaining) {
+        if (need <= 0) break;
+        if (b.storeProductId !== item.storeProductId) continue;
+        if (b.serials.length === 0) continue;
+        const take = Math.min(need, b.serials.length);
+        list.push(...b.serials.splice(0, take));
+        need -= take;
+      }
+      serialsByItemId.set(item.id, list);
+    }
+    return serialsByItemId;
   }
 
   async createReturn(dto: CreatePurchaseReturnDto) {
@@ -436,6 +616,8 @@ export class PurchaseService {
       include: { items: true },
     });
     if (!purchase) throw new NotFoundException('Purchase not found');
+
+    const reasonStored = this.composePurchaseReturnReason(dto);
 
     return this.prisma.$transaction(async (tx) => {
       let returnTotal = new Prisma.Decimal(0);
@@ -455,7 +637,7 @@ export class PurchaseService {
       const purchaseReturn = await tx.purchaseReturn.create({
         data: {
           purchaseId: dto.purchaseId,
-          reason: dto.reason,
+          reason: reasonStored ?? dto.reason ?? null,
           totalAmount: returnTotal,
           items: { create: returnItemsData },
         },
@@ -463,6 +645,33 @@ export class PurchaseService {
       });
 
       for (const item of dto.items) {
+        const sns = item.serialNumbers?.filter((s) => s?.trim()) ?? [];
+        if (sns.length > 0) {
+          if (sns.length !== item.quantity) {
+            throw new BadRequestException(
+              `Store product #${item.storeProductId}: select exactly ${item.quantity} serial(s) for IMEI-tracked return (got ${sns.length}).`,
+            );
+          }
+          for (const serial of sns) {
+            const row = await tx.serialNumber.findFirst({
+              where: {
+                serial,
+                status: 'IN_STOCK',
+                batch: { storeProductId: item.storeProductId },
+              },
+            });
+            if (!row) {
+              throw new BadRequestException(
+                `Serial not in stock for this store SKU: ${serial}`,
+              );
+            }
+            await tx.serialNumber.update({
+              where: { id: row.id },
+              data: { status: 'RETURNED' },
+            });
+          }
+        }
+
         await tx.storeProduct.update({
           where: { id: item.storeProductId },
           data: { quantity: { decrement: item.quantity } },
@@ -499,28 +708,50 @@ export class PurchaseService {
         data: { status: allReturned ? 'RETURNED' : 'PARTIAL' },
       });
 
-      if (purchase.paymentAccountId) {
+      // Refund allocation: first reduce due, then refund cash (payment account),
+      // and finally refund supplier advance (advanceBalance).
+      const purchaseDue = new Prisma.Decimal(purchase.dueAmount ?? 0);
+      const purchaseAdvance = new Prisma.Decimal(purchase.advanceApplied ?? 0);
+      const purchasePaid = new Prisma.Decimal(purchase.paidAmount ?? 0);
+      const cashPaid = purchasePaid.sub(purchaseAdvance).greaterThan(0)
+        ? purchasePaid.sub(purchaseAdvance)
+        : new Prisma.Decimal(0);
+
+      const dueReduction = Prisma.Decimal.min(returnTotal, purchaseDue);
+      const refundRemaining = returnTotal.sub(dueReduction);
+      const cashRefund = Prisma.Decimal.min(refundRemaining, cashPaid);
+      const advanceRefund = refundRemaining.sub(cashRefund);
+
+      if (purchase.paymentAccountId && cashRefund.greaterThan(0)) {
         await tx.transaction.create({
           data: {
             accountId: purchase.paymentAccountId,
             type: 'CREDIT',
-            amount: returnTotal,
+            amount: cashRefund,
             reference: purchase.referenceNo,
-            description: `Purchase return - ${purchase.referenceNo}`,
+            description: `Purchase return #${purchaseReturn.id} — ${purchase.referenceNo}`,
           },
         });
 
         await tx.account.update({
           where: { id: purchase.paymentAccountId },
-          data: { balance: { increment: returnTotal } },
+          data: { balance: { increment: cashRefund } },
         });
       }
 
       if (purchase.supplierId) {
-        await tx.supplier.update({
-          where: { id: purchase.supplierId },
-          data: { totalDue: { decrement: returnTotal } },
-        });
+        if (dueReduction.greaterThan(0)) {
+          await tx.supplier.update({
+            where: { id: purchase.supplierId },
+            data: { totalDue: { decrement: dueReduction } },
+          });
+        }
+        if (advanceRefund.greaterThan(0)) {
+          await tx.supplier.update({
+            where: { id: purchase.supplierId },
+            data: { advanceBalance: { increment: advanceRefund } },
+          });
+        }
       }
 
       return purchaseReturn;
@@ -554,6 +785,111 @@ export class PurchaseService {
     ]);
 
     return paginate(data, total, page, limit);
+  }
+
+  async findReturnOne(returnId: number) {
+    const ret = await this.prisma.purchaseReturn.findUnique({
+      where: { id: returnId },
+      include: {
+        purchase: {
+          include: {
+            supplier: true,
+            branch: true,
+            paymentAccount: true,
+          },
+        },
+        items: true,
+      },
+    });
+    if (!ret) throw new NotFoundException('Purchase return not found');
+
+    const spIds = [...new Set(ret.items.map((i) => i.storeProductId))];
+    const storeProducts =
+      spIds.length > 0
+        ? await this.prisma.storeProduct.findMany({
+            where: { id: { in: spIds } },
+            include: {
+              product: true,
+              productVariant: {
+                include: {
+                  attributes: { include: { attributeValue: true } },
+                },
+              },
+            },
+          })
+        : [];
+    const spById = new Map(storeProducts.map((sp) => [sp.id, sp]));
+
+    const items = ret.items.map((it) => ({
+      ...it,
+      storeProduct: spById.get(it.storeProductId) ?? null,
+    }));
+
+    const ref = ret.purchase.referenceNo;
+    const returnTotalNum = Number(ret.totalAmount);
+    const windowStart = new Date(ret.createdAt.getTime() - 120_000);
+    const windowEnd = new Date(ret.createdAt.getTime() + 120_000);
+
+    const ledgerCandidates = await this.prisma.transaction.findMany({
+      where: {
+        reference: ref,
+        type: 'CREDIT',
+        description: { contains: 'Purchase return' },
+      },
+      include: {
+        account: { select: { id: true, name: true, accountNumber: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    });
+
+    const ledgerCredits = ledgerCandidates.filter(
+      (t) =>
+        (t.description?.includes(`Purchase return #${ret.id}`) ?? false) ||
+        (t.createdAt >= windowStart &&
+          t.createdAt <= windowEnd &&
+          Number(t.amount) === returnTotalNum),
+    );
+
+    const accounting = {
+      returnAmount: returnTotalNum,
+      purchaseReference: ref,
+      supplierDueReduced: ret.purchase.supplierId != null,
+      supplierName: ret.purchase.supplier?.name ?? null,
+      stockReduced: true,
+      batchAdjusted: true,
+      accountCredited:
+        ret.purchase.paymentAccountId != null &&
+        Number(returnTotalNum) > 0,
+      paymentAccountName: ret.purchase.paymentAccount?.name ?? null,
+      paymentAccountId: ret.purchase.paymentAccountId,
+      steps: [
+        'Branch store quantity was decreased for each returned store SKU.',
+        'The latest matching batch had available quantity reduced and return quantity increased.',
+        'Purchase status was updated to PARTIAL or RETURNED when every line was fully returned.',
+      ] as string[],
+    };
+    if (accounting.accountCredited && accounting.paymentAccountName) {
+      accounting.steps.push(
+        `A CREDIT was posted to account “${accounting.paymentAccountName}” for the return value (cash back into that account).`,
+      );
+    } else if (!accounting.accountCredited) {
+      accounting.steps.push(
+        'No automatic account credit was posted because this purchase had no payment account on file.',
+      );
+    }
+    if (accounting.supplierDueReduced && accounting.supplierName) {
+      accounting.steps.push(
+        `Supplier “${accounting.supplierName}” total due was reduced by the return amount (less owed to supplier).`,
+      );
+    }
+
+    return {
+      ...ret,
+      items,
+      accounting,
+      ledgerCredits,
+    };
   }
 
   async getReturnSummary(query: PurchaseQueryDto) {

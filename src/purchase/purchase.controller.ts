@@ -34,14 +34,19 @@ export class PurchaseController {
     return this.purchaseService.getSummary(query);
   }
 
-  @Get('returns')
-  findReturns(@Query() query: PurchaseQueryDto) {
-    return this.purchaseService.findReturns(query);
-  }
-
   @Get('returns/summary')
   getReturnSummary(@Query() query: PurchaseQueryDto) {
     return this.purchaseService.getReturnSummary(query);
+  }
+
+  @Get('returns/:returnId')
+  findReturnOne(@Param('returnId', ParseIntPipe) returnId: number) {
+    return this.purchaseService.findReturnOne(returnId);
+  }
+
+  @Get('returns')
+  findReturns(@Query() query: PurchaseQueryDto) {
+    return this.purchaseService.findReturns(query);
   }
 
   @Get('products')

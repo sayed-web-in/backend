@@ -918,20 +918,25 @@ export class ReportService {
           : {}),
       };
 
-      const [posSaleAgg, ecomSaleAgg, saleReturnAgg] = await Promise.all([
-        this.prisma.sale.aggregate({
-          where: { ...saleWhere, orderId: null },
-          _sum: { grandTotal: true, servicesTotal: true },
-        }),
-        this.prisma.sale.aggregate({
-          where: { ...saleWhere, orderId: { not: null } },
-          _sum: { grandTotal: true, servicesTotal: true },
-        }),
-        this.prisma.saleReturn.aggregate({
-          where: saleReturnWhere,
-          _sum: { totalAmount: true },
-        }),
-      ]);
+      const [posSaleAgg, ecomSaleAgg, saleReturnRefundAgg, saleReturnGainAgg] =
+        await Promise.all([
+          this.prisma.sale.aggregate({
+            where: { ...saleWhere, orderId: null },
+            _sum: { grandTotal: true, servicesTotal: true },
+          }),
+          this.prisma.sale.aggregate({
+            where: { ...saleWhere, orderId: { not: null } },
+            _sum: { grandTotal: true, servicesTotal: true },
+          }),
+          this.prisma.saleReturn.aggregate({
+            where: saleReturnWhere,
+            _sum: { refundAmount: true },
+          }),
+          this.prisma.saleReturn.aggregate({
+            where: saleReturnWhere,
+            _sum: { returnGain: true },
+          }),
+        ]);
 
       let salSum = 0;
       let otherExpSum = 0;
@@ -1020,11 +1025,11 @@ export class ReportService {
         posSales[m] + ecommerceSales[m] + wholesaleSales[m] + quickSellSales[m];
       serviceIncome[m] = svcInc + saleSvcMonth;
       othersIncome[m] = othInc;
-      returnGain[m] = 0;
+      returnGain[m] = Number(saleReturnGainAgg._sum?.returnGain ?? 0);
       totalIncome[m] =
-        totalSales[m] + serviceIncome[m] + othersIncome[m];
+        totalSales[m] + serviceIncome[m] + othersIncome[m] + returnGain[m];
       cogs[m] = cogsMonthly[m];
-      salesReturn[m] = Number(saleReturnAgg._sum?.totalAmount ?? 0);
+      salesReturn[m] = Number(saleReturnRefundAgg._sum?.refundAmount ?? 0);
       salaryWages[m] = salSum;
       otherOperatingExpenses[m] = otherExpSum;
       totalExpense[m] =

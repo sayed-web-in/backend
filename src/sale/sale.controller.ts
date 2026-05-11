@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Body,
   Param,
   Query,
@@ -13,6 +14,7 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
+import { PatchSaleReturnRefundDto } from './dto/patch-sale-return-refund.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
@@ -43,6 +45,20 @@ export class SaleController {
   @Get('returns')
   findReturns(@Query() query: SaleReturnQueryDto) {
     return this.saleService.findReturns(query);
+  }
+
+  @Get('returns/:returnId')
+  findReturnOne(@Param('returnId', ParseIntPipe) returnId: number) {
+    return this.saleService.findReturnOne(returnId);
+  }
+
+  /** Record cash refund from a finance account (seller-admin “Complete” modal). */
+  @Patch('returns/:returnId')
+  patchReturnCashRefund(
+    @Param('returnId', ParseIntPipe) returnId: number,
+    @Body() dto: PatchSaleReturnRefundDto,
+  ) {
+    return this.saleService.recordReturnCashRefund(returnId, dto);
   }
 
   @Get('pay-later/stats')

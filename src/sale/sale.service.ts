@@ -9,6 +9,7 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
+import { PatchSaleReturnRefundDto } from './dto/patch-sale-return-refund.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { ProductTransactionQueryDto } from './dto/product-transaction-query.dto.js';
 import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
@@ -529,11 +530,19 @@ export class SaleService {
       AND: [where, { createdAt: { gte: startOfToday, lte: endOfToday } }],
     };
 
-    const [total, sumAgg, todayCount] = await Promise.all([
+    const [total, sumAgg, sumRefund, sumGain, todayCount] = await Promise.all([
       this.prisma.saleReturn.count({ where }),
       this.prisma.saleReturn.aggregate({
         where,
         _sum: { totalAmount: true },
+      }),
+      this.prisma.saleReturn.aggregate({
+        where,
+        _sum: { refundAmount: true },
+      }),
+      this.prisma.saleReturn.aggregate({
+        where,
+        _sum: { returnGain: true },
       }),
       this.prisma.saleReturn.count({ where: todayWhere }),
     ]);
@@ -541,6 +550,8 @@ export class SaleService {
     return {
       total,
       totalReturnAmount: Number(sumAgg._sum.totalAmount ?? 0),
+      totalRefundAmount: Number(sumRefund._sum.refundAmount ?? 0),
+      totalReturnGain: Number(sumGain._sum.returnGain ?? 0),
       todayReturns: todayCount,
     };
   }
@@ -578,7 +589,38 @@ export class SaleService {
       },
     });
     if (!sale) throw new NotFoundException('Sale not found');
-    return sale;
+
+    const returnRows =
+      sale.returns?.flatMap((r) =>
+        (r.items ?? []).map((it) => ({
+          saleItemId: it.saleItemId,
+          storeProductId: it.storeProductId,
+          quantity: it.quantity,
+        })),
+      ) ?? [];
+
+    const itemsWithAvail = sale.items.map((si) => {
+      const sameSp = sale.items.filter((x) => x.storeProductId === si.storeProductId);
+      let returned = 0;
+      for (const r of returnRows) {
+        if (r.saleItemId === si.id) returned += r.quantity;
+        else if (
+          r.saleItemId == null &&
+          r.storeProductId === si.storeProductId &&
+          sameSp.length === 1
+        ) {
+          returned += r.quantity;
+        }
+      }
+      const availableReturnQty = Math.max(0, si.quantity - returned);
+      return {
+        ...si,
+        returnedQuantity: returned,
+        availableReturnQty,
+      };
+    });
+
+    return { ...sale, items: itemsWithAvail };
   }
 
   async getPayLaterStats(query: PayLaterQueryDto) {
@@ -637,37 +679,253 @@ export class SaleService {
     return paginate(data, total, page, limit);
   }
 
+  private composeSaleReturnReason(dto: CreateSaleReturnDto): string | null {
+    const blocks: string[] = [];
+    if (dto.returnDate?.trim()) blocks.push(`Return date: ${dto.returnDate.trim()}`);
+    if (dto.reference?.trim()) blocks.push(`Reference: ${dto.reference.trim()}`);
+    if (dto.responsiblePerson?.trim()) {
+      blocks.push(`Responsible: ${dto.responsiblePerson.trim()}`);
+    }
+    if (dto.notes?.trim()) blocks.push(`Notes: ${dto.notes.trim()}`);
+    if (dto.reason?.trim()) blocks.push(dto.reason.trim());
+    const s = blocks.join('\n').trim();
+    return s.length ? s : null;
+  }
+
+  private lineDamageAmount(
+    lineTotal: Prisma.Decimal,
+    type?: string,
+    rawVal?: number,
+  ): Prisma.Decimal {
+    if (!type || type === 'none' || rawVal == null || rawVal <= 0) {
+      return new Prisma.Decimal(0);
+    }
+    const val = new Prisma.Decimal(rawVal);
+    if (type === 'percentage') {
+      const p = Prisma.Decimal.min(val, new Prisma.Decimal(100));
+      return lineTotal.mul(p).div(new Prisma.Decimal(100));
+    }
+    if (type === 'fixed') {
+      return Prisma.Decimal.min(lineTotal, val);
+    }
+    return new Prisma.Decimal(0);
+  }
+
+  private resolveSaleItemForReturn(
+    sale: { items: { id: number; storeProductId: number; quantity: number }[] },
+    dtoItem: { saleItemId?: number; storeProductId: number },
+  ) {
+    if (dtoItem.saleItemId != null) {
+      const si = sale.items.find(
+        (i) => i.id === dtoItem.saleItemId && i.storeProductId === dtoItem.storeProductId,
+      );
+      if (!si) {
+        throw new BadRequestException(
+          `saleItemId ${dtoItem.saleItemId} does not match this sale / store product`,
+        );
+      }
+      return si;
+    }
+    const matches = sale.items.filter(
+      (i) => i.storeProductId === dtoItem.storeProductId,
+    );
+    if (matches.length === 1) return matches[0];
+    throw new BadRequestException(
+      `saleItemId is required when multiple invoice lines use store product #${dtoItem.storeProductId}`,
+    );
+  }
+
+  private priorReturnedForSaleLine(
+    saleItems: { id: number; storeProductId: number; quantity: number }[],
+    returnRows: { saleItemId: number | null; storeProductId: number; quantity: number }[],
+    si: { id: number; storeProductId: number },
+  ): number {
+    const sameSp = saleItems.filter((x) => x.storeProductId === si.storeProductId);
+    let returned = 0;
+    for (const r of returnRows) {
+      if (r.saleItemId === si.id) returned += r.quantity;
+      else if (
+        r.saleItemId == null &&
+        r.storeProductId === si.storeProductId &&
+        sameSp.length === 1
+      ) {
+        returned += r.quantity;
+      }
+    }
+    return returned;
+  }
+
   async createReturn(dto: CreateSaleReturnDto) {
     const sale = await this.prisma.sale.findUnique({
       where: { id: dto.saleId },
-      include: { items: true },
+      include: {
+        items: { include: { serialNumbers: true } },
+      },
     });
     if (!sale) throw new NotFoundException('Sale not found');
+    if (sale.status === 'RETURNED') {
+      throw new BadRequestException('Sale is already fully returned');
+    }
+
+    const priorRows = await this.prisma.saleReturnItem.findMany({
+      where: { saleReturn: { saleId: dto.saleId } },
+      select: { saleItemId: true, storeProductId: true, quantity: true },
+    });
+
+    const reasonStored = this.composeSaleReturnReason(dto);
 
     return this.prisma.$transaction(async (tx) => {
-      let returnTotal = new Prisma.Decimal(0);
-      const returnItemsData = dto.items.map((item) => {
-        const itemTotal = new Prisma.Decimal(item.unitPrice * item.quantity);
-        returnTotal = returnTotal.add(itemTotal);
-        return {
-          storeProductId: item.storeProductId,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          total: itemTotal,
-        };
-      });
+      const saleItems = sale.items.map((i) => ({
+        id: i.id,
+        storeProductId: i.storeProductId,
+        quantity: i.quantity,
+      }));
 
+      type SaleItemRow = (typeof sale.items)[number];
+
+      type Prepared = {
+        dto: (typeof dto.items)[0];
+        saleItem: SaleItemRow;
+        lineTotal: Prisma.Decimal;
+        damage: Prisma.Decimal;
+        refundLine: Prisma.Decimal;
+        gainLine: Prisma.Decimal;
+        dmgType: string | null;
+        dmgVal: Prisma.Decimal | null;
+      };
+
+      const prepared: Prepared[] = [];
+
+      for (const item of dto.items) {
+        const saleItem = this.resolveSaleItemForReturn(
+          sale,
+          item,
+        ) as (typeof sale.items)[number];
+        const already = this.priorReturnedForSaleLine(
+          saleItems,
+          priorRows,
+          saleItem,
+        );
+        const maxLeft = saleItem.quantity - already;
+        if (item.quantity > maxLeft) {
+          throw new BadRequestException(
+            `Return qty ${item.quantity} exceeds remaining ${maxLeft} for invoice line #${saleItem.id}`,
+          );
+        }
+
+        const lineTotal = new Prisma.Decimal(item.unitPrice).mul(
+          new Prisma.Decimal(item.quantity),
+        );
+        const dmgType = item.damageDeductionType ?? 'none';
+        const damage = this.lineDamageAmount(
+          lineTotal,
+          dmgType,
+          item.damageDeductionValue,
+        );
+        if (damage.sub(lineTotal).greaterThan(0.02)) {
+          throw new BadRequestException('Damage deduction cannot exceed line total');
+        }
+        const refundLine = lineTotal.sub(damage);
+        const gainLine = damage;
+
+        const soldSerials = await tx.serialNumber.findMany({
+          where: { saleItemId: saleItem.id, status: 'SOLD' },
+          select: { id: true, serial: true },
+        });
+        if (soldSerials.length > 0) {
+          const sns = item.serialNumbers?.map((s) => s?.trim()).filter(Boolean) ?? [];
+          if (sns.length !== item.quantity) {
+            throw new BadRequestException(
+              `Line #${saleItem.id}: select exactly ${item.quantity} serial(s) for IMEI-tracked return (got ${sns.length}).`,
+            );
+          }
+          const allowed = new Set(soldSerials.map((s) => s.serial));
+          for (const sn of sns) {
+            if (!allowed.has(sn)) {
+              throw new BadRequestException(`Serial not sold on this line: ${sn}`);
+            }
+          }
+        } else if (item.serialNumbers?.length) {
+          throw new BadRequestException(
+            `Line #${saleItem.id}: serialNumbers were sent but this line has no sold IMEI rows`,
+          );
+        }
+
+        prepared.push({
+          dto: item,
+          saleItem,
+          lineTotal,
+          damage,
+          refundLine,
+          gainLine,
+          dmgType: dmgType === 'none' ? null : dmgType,
+          dmgVal:
+            dmgType !== 'none' && (item.damageDeductionValue ?? 0) > 0
+              ? new Prisma.Decimal(item.damageDeductionValue ?? 0)
+              : null,
+        });
+      }
+
+      let returnGross = new Prisma.Decimal(0);
+      let refundTotal = new Prisma.Decimal(0);
+      let gainTotal = new Prisma.Decimal(0);
+      for (const p of prepared) {
+        returnGross = returnGross.add(p.lineTotal);
+        refundTotal = refundTotal.add(p.refundLine);
+        gainTotal = gainTotal.add(p.gainLine);
+      }
+
+      const returnItemsCreate = prepared.map((p) => ({
+        saleItemId: p.saleItem.id,
+        storeProductId: p.dto.storeProductId,
+        quantity: p.dto.quantity,
+        unitPrice: p.dto.unitPrice,
+        total: p.lineTotal,
+        damageDeductionType: p.dmgType,
+        damageDeductionValue: p.dmgVal,
+      }));
+
+      const refund = refundTotal;
+      const due = new Prisma.Decimal(sale.dueAmount ?? 0);
+      const adv = new Prisma.Decimal(sale.advanceApplied ?? 0);
+      const grand = new Prisma.Decimal(sale.grandTotal ?? 0);
+
+      let dueReduction = new Prisma.Decimal(0);
+      let advanceRefund = new Prisma.Decimal(0);
+      let cashRefund = new Prisma.Decimal(0);
+      if (refund.greaterThan(0)) {
+        dueReduction = Prisma.Decimal.min(refund, due);
+        const afterDue = refund.sub(dueReduction);
+        if (grand.greaterThan(0) && adv.greaterThan(0)) {
+          const prop = adv.mul(refund).div(grand);
+          advanceRefund = Prisma.Decimal.min(afterDue, prop);
+        }
+        if (advanceRefund.sub(adv).greaterThan(0.02)) {
+          advanceRefund = adv;
+        }
+        cashRefund = afterDue.sub(advanceRefund);
+      }
+
+      const needsCashPayout = cashRefund.greaterThan(0.005);
       const saleReturn = await tx.saleReturn.create({
         data: {
           saleId: dto.saleId,
-          reason: dto.reason,
-          totalAmount: returnTotal,
-          items: { create: returnItemsData },
+          reason: reasonStored ?? dto.reason ?? null,
+          totalAmount: returnGross,
+          refundAmount: refundTotal,
+          returnGain: gainTotal,
+          status: needsCashPayout ? 'pending' : 'completed',
+          pendingCashRefund: cashRefund,
+          cashRefundPaid: new Prisma.Decimal(0),
+          items: { create: returnItemsCreate },
         },
         include: { items: true },
       });
 
-      for (const item of dto.items) {
+      for (const p of prepared) {
+        const item = p.dto;
+        const saleItem = p.saleItem;
+
         await tx.storeProduct.update({
           where: { id: item.storeProductId },
           data: { quantity: { increment: item.quantity } },
@@ -680,33 +938,45 @@ export class SaleService {
 
         if (batch) {
           const restoreQty = Math.min(batch.soldQty, item.quantity);
-          await tx.batch.update({
-            where: { id: batch.id },
-            data: {
-              availableQty: { increment: restoreQty },
-              soldQty: { decrement: restoreQty },
-              returnQty: { increment: restoreQty },
-            },
-          });
+          if (restoreQty > 0) {
+            await tx.batch.update({
+              where: { id: batch.id },
+              data: {
+                availableQty: { increment: restoreQty },
+                soldQty: { decrement: restoreQty },
+                returnQty: { increment: restoreQty },
+              },
+            });
+          }
         }
 
-        const saleItem = sale.items.find(
-          (si) => si.storeProductId === item.storeProductId,
-        );
-        if (saleItem) {
-          await tx.serialNumber.updateMany({
-            where: { saleItemId: saleItem.id, status: 'SOLD' },
-            data: { status: 'RETURNED', saleItemId: null },
-          });
+        const sns = item.serialNumbers?.map((s) => s?.trim()).filter(Boolean) ?? [];
+        if (sns.length > 0) {
+          for (const serial of sns) {
+            await tx.serialNumber.updateMany({
+              where: {
+                serial,
+                saleItemId: saleItem.id,
+                status: 'SOLD',
+              },
+              data: { status: 'RETURNED', saleItemId: null },
+            });
+          }
         }
       }
 
-      const allReturnedQty = await this.getTotalReturnedQuantities(
-        tx,
-        dto.saleId,
-      );
+      const newReturnRows = prepared.map((p) => ({
+        saleItemId: p.saleItem.id,
+        storeProductId: p.dto.storeProductId,
+        quantity: p.dto.quantity,
+      }));
+
       const allSold = sale.items.every((si) => {
-        const returned = allReturnedQty.get(si.storeProductId) ?? 0;
+        const returned = this.priorReturnedForSaleLine(
+          saleItems,
+          [...priorRows, ...newReturnRows],
+          si,
+        );
         return returned >= si.quantity;
       });
 
@@ -715,46 +985,200 @@ export class SaleService {
         data: { status: allSold ? 'RETURNED' : 'PARTIAL_RETURN' },
       });
 
-      if (sale.paymentAccountId) {
-        await tx.transaction.create({
-          data: {
-            accountId: sale.paymentAccountId,
-            type: 'DEBIT',
-            amount: returnTotal,
-            reference: sale.invoiceNumber,
-            description: `Sale return - ${sale.invoiceNumber}`,
-          },
-        });
-
-        await tx.account.update({
-          where: { id: sale.paymentAccountId },
-          data: { balance: { decrement: returnTotal } },
-        });
+      if (refund.greaterThan(0)) {
+        const saleMoneyPatch: Prisma.SaleUpdateInput = {};
+        if (dueReduction.greaterThan(0)) {
+          saleMoneyPatch.dueAmount = { decrement: dueReduction };
+        }
+        if (advanceRefund.greaterThan(0)) {
+          saleMoneyPatch.advanceApplied = { decrement: advanceRefund };
+        }
+        if (Object.keys(saleMoneyPatch).length > 0) {
+          await tx.sale.update({
+            where: { id: dto.saleId },
+            data: saleMoneyPatch,
+          });
+        }
+        if (advanceRefund.greaterThan(0) && sale.customerId) {
+          await tx.customer.update({
+            where: { id: sale.customerId },
+            data: { totalAdvance: { increment: advanceRefund } },
+          });
+        }
       }
 
       return saleReturn;
     });
   }
 
-  private async getTotalReturnedQuantities(
-    tx: Prisma.TransactionClient,
-    saleId: number,
-  ): Promise<Map<number, number>> {
-    const returns = await tx.saleReturn.findMany({
-      where: { saleId },
-      include: { items: true },
+  async findReturnOne(returnId: number) {
+    const ret = await this.prisma.saleReturn.findUnique({
+      where: { id: returnId },
+      include: {
+        sale: {
+          include: {
+            customer: true,
+            branch: true,
+            paymentAccount: true,
+          },
+        },
+        refundAccount: true,
+        items: true,
+      },
     });
+    if (!ret) throw new NotFoundException('Sale return not found');
 
-    const map = new Map<number, number>();
-    for (const ret of returns) {
-      for (const item of ret.items) {
-        map.set(
-          item.storeProductId,
-          (map.get(item.storeProductId) ?? 0) + item.quantity,
+    const spIds = [...new Set(ret.items.map((i) => i.storeProductId))];
+    const storeProducts =
+      spIds.length > 0
+        ? await this.prisma.storeProduct.findMany({
+            where: { id: { in: spIds } },
+            include: {
+              product: true,
+              productVariant: {
+                include: {
+                  attributes: { include: { attributeValue: true } },
+                },
+              },
+            },
+          })
+        : [];
+    const spById = new Map(storeProducts.map((sp) => [sp.id, sp]));
+
+    const items = ret.items.map((it) => ({
+      ...it,
+      storeProduct: spById.get(it.storeProductId) ?? null,
+    }));
+
+    const gross = Number(ret.totalAmount);
+    const refund = Number(ret.refundAmount);
+    const gain = Number(ret.returnGain);
+    const pendingCap = Number(ret.pendingCashRefund ?? 0);
+    const cashPaid = Number(ret.cashRefundPaid ?? 0);
+    const remainingCash = Math.max(0, Math.round((pendingCap - cashPaid) * 100) / 100);
+    const status = ret.status ?? 'completed';
+
+    const accounting = {
+      grossReturnValue: gross,
+      refundToCustomer: refund,
+      returnGainRetained: gain,
+      status,
+      pendingCashRefund: pendingCap,
+      cashRefundPaid: cashPaid,
+      remainingCashRefund: remainingCash,
+      stockRestored: true,
+      customerAdvanceCredited: refund > 0 && ret.sale.customerId != null,
+      /** True once any cash refund payment was posted from a finance account. */
+      accountDebited: cashPaid > 0.005,
+      paymentAccountName: ret.sale.paymentAccount?.name ?? null,
+      refundAccountName: ret.refundAccount?.name ?? null,
+      steps: [
+        'Store quantity was increased for each returned SKU.',
+        'Latest batch sold quantity was reduced where possible.',
+        'Sale status set to RETURNED or PARTIAL_RETURN when every invoice line is fully returned.',
+      ] as string[],
+    };
+    if (gain > 0) {
+      accounting.steps.push(
+        `Return gain (damage retention): ${gain.toFixed(2)} — shown under Profit & Loss → Return gain.`,
+      );
+    }
+    if (refund > 0) {
+      accounting.steps.push(
+        'Customer refund allocation at return time: sale due was reduced first, then customer advance wallet was credited proportionally (same rule as before).',
+      );
+      if (pendingCap > 0.005) {
+        accounting.steps.push(
+          `Cash/bank leg (${pendingCap.toFixed(2)}): recorded as pending — pay out from a finance account on this page (seller-admin style). Paid so far: ${cashPaid.toFixed(2)}; remaining: ${remainingCash.toFixed(2)}.`,
+        );
+      } else {
+        accounting.steps.push(
+          'No separate cash payout was required (refund was fully absorbed by due and advance).',
         );
       }
     }
-    return map;
+
+    return {
+      ...ret,
+      items,
+      accounting,
+    };
+  }
+
+  async recordReturnCashRefund(
+    returnId: number,
+    dto: PatchSaleReturnRefundDto,
+  ) {
+    const amount = new Prisma.Decimal(dto.paymentAmount);
+    if (amount.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('paymentAmount must be greater than 0');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const ret = await tx.saleReturn.findUnique({
+        where: { id: returnId },
+        include: { sale: { select: { id: true, invoiceNumber: true } } },
+      });
+      if (!ret) throw new NotFoundException('Sale return not found');
+      if (ret.status === 'cancelled') {
+        throw new BadRequestException('This return is cancelled');
+      }
+
+      const pendingCap = new Prisma.Decimal(ret.pendingCashRefund ?? 0);
+      const paidSoFar = new Prisma.Decimal(ret.cashRefundPaid ?? 0);
+      const remaining = pendingCap.sub(paidSoFar);
+
+      if (remaining.lessThanOrEqualTo(0.005)) {
+        throw new BadRequestException(
+          'No cash refund is pending for this return',
+        );
+      }
+      if (amount.sub(remaining).greaterThan(0.01)) {
+        throw new BadRequestException(
+          `Payment cannot exceed remaining ${remaining.toFixed(2)}`,
+        );
+      }
+
+      const acc = await tx.account.findUnique({
+        where: { id: dto.refundAccountId },
+      });
+      if (!acc) throw new NotFoundException('Account not found');
+      if (!acc.isActive) {
+        throw new BadRequestException('Account is not active');
+      }
+      const bal = new Prisma.Decimal(acc.balance);
+      if (amount.sub(bal).greaterThan(0.01)) {
+        throw new BadRequestException('Insufficient account balance');
+      }
+
+      await tx.transaction.create({
+        data: {
+          accountId: dto.refundAccountId,
+          type: 'DEBIT',
+          amount,
+          reference: ret.sale.invoiceNumber,
+          description: `Sale return #${ret.id} cash refund — ${ret.sale.invoiceNumber}`,
+        },
+      });
+      await tx.account.update({
+        where: { id: dto.refundAccountId },
+        data: { balance: { decrement: amount } },
+      });
+
+      const newPaid = paidSoFar.add(amount);
+      const done = newPaid.add(new Prisma.Decimal(0.01)).greaterThanOrEqualTo(pendingCap);
+
+      await tx.saleReturn.update({
+        where: { id: returnId },
+        data: {
+          cashRefundPaid: newPaid,
+          refundAccountId: dto.refundAccountId,
+          status: done ? 'completed' : 'pending',
+        },
+      });
+    });
+
+    return this.findReturnOne(returnId);
   }
 
   async getProductTransactions(query: ProductTransactionQueryDto) {
