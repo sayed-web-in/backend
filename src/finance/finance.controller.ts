@@ -183,8 +183,12 @@ export class FinanceController {
   // ─── REPORTS ───────────────────────────────────────────────
 
   @Get('trial-balance')
-  getTrialBalance() {
-    return this.financeService.getTrialBalance();
+  getTrialBalance(@Query('branchId') branchId?: string) {
+    const id =
+      branchId != null && branchId !== '' && Number.isFinite(Number(branchId))
+        ? Math.floor(Number(branchId))
+        : undefined;
+    return this.financeService.getTrialBalance(id);
   }
 
   @Get('cash-flow')

@@ -1,7 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateBranchDto } from './dto/create-branch.dto.js';
 import { UpdateBranchDto } from './dto/update-branch.dto.js';
+
+/** Single-branch tenant: at most one row; the last branch cannot be deleted. */
+const MAX_BRANCHES = 1;
 
 @Injectable()
 export class BranchService {
@@ -18,7 +25,15 @@ export class BranchService {
   }
 
   async create(dto: CreateBranchDto) {
-    return this.prisma.branch.create({ data: dto });
+    return this.prisma.$transaction(async (tx) => {
+      const count = await tx.branch.count();
+      if (count >= MAX_BRANCHES) {
+        throw new BadRequestException(
+          'Only one branch is allowed. Edit your existing branch instead of adding another.',
+        );
+      }
+      return tx.branch.create({ data: dto });
+    });
   }
 
   async update(id: number, dto: UpdateBranchDto) {
@@ -28,6 +43,12 @@ export class BranchService {
 
   async remove(id: number) {
     await this.findOne(id);
+    const count = await this.prisma.branch.count();
+    if (count <= 1) {
+      throw new BadRequestException(
+        'The last branch cannot be deleted. Create another branch first, or keep this one.',
+      );
+    }
     return this.prisma.branch.delete({ where: { id } });
   }
 }

@@ -31,10 +31,15 @@ export class SaleService {
     return this.prisma.$transaction(async (tx) => {
       const invoiceNumber = this.generateInvoiceNumber();
 
+      /** Sum lines with Decimal (avoid JS float drift vs POS `formatPrice` / whole-taka display). */
       let totalAmount = new Prisma.Decimal(0);
       for (const item of dto.items) {
-        const itemTotal = item.unitPrice * item.quantity - (item.discount ?? 0);
-        totalAmount = totalAmount.add(new Prisma.Decimal(itemTotal));
+        const itemDiscount = new Prisma.Decimal(item.discount ?? 0);
+        const lineTotal = new Prisma.Decimal(item.unitPrice)
+          .mul(item.quantity)
+          .sub(itemDiscount)
+          .toDecimalPlaces(2);
+        totalAmount = totalAmount.add(lineTotal);
       }
 
       const discount = new Prisma.Decimal(dto.discount ?? 0);
@@ -43,7 +48,11 @@ export class SaleService {
       if (servicesTotal.lessThan(0)) {
         throw new BadRequestException('servicesTotal cannot be negative');
       }
-      const grandTotal = totalAmount.sub(discount).add(tax).add(servicesTotal);
+      const grandTotal = totalAmount
+        .sub(discount)
+        .add(tax)
+        .add(servicesTotal)
+        .toDecimalPlaces(2);
 
       const status = dto.status ?? 'COMPLETED';
       let advanceDec = new Prisma.Decimal(dto.advanceApplied ?? 0);
@@ -129,9 +138,10 @@ export class SaleService {
 
       for (const item of dto.items) {
         const itemDiscount = new Prisma.Decimal(item.discount ?? 0);
-        const itemTotal = new Prisma.Decimal(
-          item.unitPrice * item.quantity,
-        ).sub(itemDiscount);
+        const itemTotal = new Prisma.Decimal(item.unitPrice)
+          .mul(item.quantity)
+          .sub(itemDiscount)
+          .toDecimalPlaces(2);
 
         const saleItem = await tx.saleItem.create({
           data: {
@@ -177,6 +187,11 @@ export class SaleService {
       }
 
       if (effectiveStatus === 'COMPLETED') {
+        /** Net cash/bank leg credited to accounts (seller-style): overpay/change is not deposited. */
+        const moneyCreditCap = paidAmount.sub(advanceDec).greaterThan(0)
+          ? paidAmount.sub(advanceDec)
+          : new Prisma.Decimal(0);
+
         const providedPayments = Array.isArray(dto.payments)
           ? dto.payments
               .map((p) => ({
@@ -187,40 +202,71 @@ export class SaleService {
           : [];
 
         if (providedPayments.length > 0) {
+          let rawSumDec = new Prisma.Decimal(0);
           for (const p of providedPayments) {
-            const alloc = new Prisma.Decimal(p.amount);
-            if (alloc.lte(0)) continue;
+            rawSumDec = rawSumDec.add(new Prisma.Decimal(p.amount));
+          }
 
+          if (rawSumDec.greaterThan(0)) {
+            const totalToCredit = rawSumDec.lessThan(moneyCreditCap)
+              ? rawSumDec
+              : moneyCreditCap;
+
+            if (totalToCredit.greaterThan(0)) {
+              let credited = new Prisma.Decimal(0);
+              for (let i = 0; i < providedPayments.length; i++) {
+                const p = providedPayments[i];
+                const rowAmt = new Prisma.Decimal(p.amount);
+                if (rowAmt.lte(0)) continue;
+
+                const isLastPositive =
+                  !providedPayments
+                    .slice(i + 1)
+                    .some((x) => new Prisma.Decimal(x.amount).greaterThan(0));
+
+                const portion = isLastPositive
+                  ? totalToCredit.sub(credited)
+                  : totalToCredit.mul(rowAmt).div(rawSumDec).toDecimalPlaces(2);
+                credited = credited.add(portion);
+                if (portion.lte(0)) continue;
+
+                await tx.transaction.create({
+                  data: {
+                    accountId: p.accountId,
+                    type: 'CREDIT',
+                    amount: portion,
+                    reference: invoiceNumber,
+                    description: `Sale payment - ${invoiceNumber}`,
+                  },
+                });
+
+                await tx.account.update({
+                  where: { id: p.accountId },
+                  data: { balance: { increment: portion } },
+                });
+              }
+            }
+          }
+        } else if (dto.paymentAccountId && totalCashGross.greaterThan(0)) {
+          const creditAmt = totalCashGross.lessThan(moneyCreditCap)
+            ? totalCashGross
+            : moneyCreditCap;
+          if (creditAmt.greaterThan(0)) {
             await tx.transaction.create({
               data: {
-                accountId: p.accountId,
+                accountId: dto.paymentAccountId,
                 type: 'CREDIT',
-                amount: alloc,
+                amount: creditAmt,
                 reference: invoiceNumber,
                 description: `Sale payment - ${invoiceNumber}`,
               },
             });
 
             await tx.account.update({
-              where: { id: p.accountId },
-              data: { balance: { increment: alloc } },
+              where: { id: dto.paymentAccountId },
+              data: { balance: { increment: creditAmt } },
             });
           }
-        } else if (dto.paymentAccountId && totalCashGross.greaterThan(0)) {
-          await tx.transaction.create({
-            data: {
-              accountId: dto.paymentAccountId,
-              type: 'CREDIT',
-              amount: totalCashGross,
-              reference: invoiceNumber,
-              description: `Sale payment - ${invoiceNumber}`,
-            },
-          });
-
-          await tx.account.update({
-            where: { id: dto.paymentAccountId },
-            data: { balance: { increment: totalCashGross } },
-          });
         }
       }
 

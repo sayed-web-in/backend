@@ -14,7 +14,7 @@ import { CreateIncomeDto } from './dto/create-income.dto.js';
 import { CreateTaxRateDto } from './dto/create-tax-rate.dto.js';
 import { FinanceQueryDto } from './dto/finance-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
-import { Prisma } from '@prisma/client';
+import { Prisma, SaleStatus, AccountType, SupplierTransactionType } from '@prisma/client';
 import {
   bdDayEndUtc,
   bdDayStartUtc,
@@ -758,39 +758,390 @@ export class FinanceService {
 
   // ─── REPORTS ───────────────────────────────────────────────
 
-  async getTrialBalance() {
-    const accounts = await this.prisma.account.findMany({
-      where: { isActive: true },
+  /** Same cost basis as `ReportService` P&amp;L (batch avg → purchase item avg). */
+  private async tbAvgUnitCostByStoreProduct(
+    storeProductIds: number[],
+  ): Promise<Map<number, number>> {
+    const map = new Map<number, number>();
+    if (storeProductIds.length === 0) return map;
+
+    const batchAvgs = await this.prisma.batch.groupBy({
+      by: ['storeProductId'],
+      where: { storeProductId: { in: storeProductIds } },
+      _avg: { purchaseCost: true },
     });
-
-    const grouped: Record<
-      string,
-      { accounts: typeof accounts; total: Prisma.Decimal }
-    > = {};
-    let totalAssets = new Prisma.Decimal(0);
-
-    for (const acc of accounts) {
-      if (!grouped[acc.type]) {
-        grouped[acc.type] = { accounts: [], total: new Prisma.Decimal(0) };
-      }
-      grouped[acc.type].accounts.push(acc);
-      grouped[acc.type].total = grouped[acc.type].total.add(acc.balance);
-      totalAssets = totalAssets.add(acc.balance);
+    for (const row of batchAvgs) {
+      map.set(row.storeProductId, Number(row._avg.purchaseCost ?? 0));
     }
 
-    const debitResult = await this.prisma.transaction.aggregate({
-      where: { type: 'DEBIT' },
+    const missing = storeProductIds.filter((id) => (map.get(id) ?? 0) <= 0);
+    if (missing.length === 0) return map;
+
+    const purchaseAvgs = await this.prisma.purchaseItem.groupBy({
+      by: ['storeProductId'],
+      where: { storeProductId: { in: missing } },
+      _avg: { unitCost: true },
+    });
+    for (const row of purchaseAvgs) {
+      const v = Number(row._avg.unitCost ?? 0);
+      if (v > 0) map.set(row.storeProductId, v);
+    }
+    return map;
+  }
+
+  /** COGS from sale lines: Σ qty × unit cost (not purchase receipts in period). */
+  private async tbCogsFromSoldItems(
+    saleWhere: Prisma.SaleWhereInput,
+  ): Promise<number> {
+    const items = await this.prisma.saleItem.findMany({
+      where: { sale: saleWhere },
+      select: { storeProductId: true, quantity: true },
+    });
+    if (items.length === 0) return 0;
+    const storeIds = [...new Set(items.map((i) => i.storeProductId))];
+    const costMap = await this.tbAvgUnitCostByStoreProduct(storeIds);
+    let sum = 0;
+    for (const it of items) {
+      sum += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+    }
+    return sum;
+  }
+
+  /** COGS reversed when stock comes back from sale returns. */
+  private async tbReturnCogs(
+    saleReturnWhere: Prisma.SaleReturnWhereInput,
+  ): Promise<number> {
+    const items = await this.prisma.saleReturnItem.findMany({
+      where: { saleReturn: saleReturnWhere },
+      select: { storeProductId: true, quantity: true },
+    });
+    if (items.length === 0) return 0;
+    const storeIds = [...new Set(items.map((i) => i.storeProductId))];
+    const costMap = await this.tbAvgUnitCostByStoreProduct(storeIds);
+    let sum = 0;
+    for (const it of items) {
+      sum += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+    }
+    return sum;
+  }
+
+  /**
+   * Statement-style trial balance: assets, liabilities, owner equity, and A = L + E check.
+   * Cash/bank/mobile accounts are organisation-wide (no branch on Account). Branch filters
+   * sales due, inventory (batches), and branch-scoped P&amp;L (strict branch on income/expense).
+   * Lifetime COGS uses sold items (same as profit report), minus return lines.
+   */
+  async getTrialBalance(branchId?: number) {
+    const bid =
+      branchId != null && Number.isFinite(Number(branchId))
+        ? Math.floor(Number(branchId))
+        : undefined;
+    const saleBranch = bid != null ? { branchId: bid } : {};
+    const storeProductBranch = bid != null ? { branchId: bid } : {};
+    /** Match dashboard P&amp;L: branch-scoped income/expense only (no orphan `branchId: null` rows in branch view). */
+    const incomeBranch = bid != null ? { branchId: bid } : {};
+    const expenseBranch = bid != null ? { branchId: bid } : {};
+    const saleReturnBranch =
+      bid != null ? { sale: { branchId: bid } } : {};
+
+    const toNum = (d: Prisma.Decimal | null | undefined) => Number(d ?? 0);
+
+    const liquidTypes: AccountType[] = [
+      AccountType.CASH,
+      AccountType.BANK,
+      AccountType.MOBILE_BANKING,
+    ];
+
+    const [
+      liquidAccounts,
+      salesDueAgg,
+      manualDueAgg,
+      supplierDueAgg,
+      supplierAdvanceAgg,
+      customerAdvanceAgg,
+      batches,
+      salesRevAgg,
+      incomeAgg,
+      saleReturnAgg,
+      expenseAgg,
+      openingCapitalAgg,
+    ] = await Promise.all([
+      this.prisma.account.findMany({
+        where: { isActive: true, type: { in: liquidTypes } },
+        orderBy: [{ type: 'asc' }, { name: 'asc' }],
+      }),
+      this.prisma.sale.aggregate({
+        where: {
+          status: { not: SaleStatus.RETURNED },
+          ...saleBranch,
+        },
+        _sum: { dueAmount: true },
+      }),
+      this.prisma.customer.aggregate({
+        _sum: { manualDue: true },
+      }),
+      this.prisma.supplier.aggregate({
+        where: { isActive: true },
+        _sum: { totalDue: true },
+      }),
+      this.prisma.supplier.aggregate({
+        where: { isActive: true },
+        _sum: { advanceBalance: true },
+      }),
+      this.prisma.customer.aggregate({
+        _sum: { totalAdvance: true },
+      }),
+      this.prisma.batch.findMany({
+        where: { storeProduct: storeProductBranch },
+        select: {
+          batchType: true,
+          availableQty: true,
+          initialQty: true,
+          purchaseCost: true,
+          totalCost: true,
+        },
+      }),
+      this.prisma.sale.aggregate({
+        where: { status: { not: SaleStatus.RETURNED }, ...saleBranch },
+        _sum: { grandTotal: true },
+      }),
+      this.prisma.income.aggregate({
+        where: { status: 'active', ...incomeBranch },
+        _sum: { amount: true },
+      }),
+      this.prisma.saleReturn.aggregate({
+        where: saleReturnBranch,
+        _sum: { refundAmount: true, returnGain: true },
+      }),
+      this.prisma.expense.aggregate({
+        where: { status: 'active', ...expenseBranch },
+        _sum: { amount: true },
+      }),
+      this.prisma.account.aggregate({
+        where: { isActive: true, type: { in: liquidTypes } },
+        _sum: { openingBalance: true },
+      }),
+    ]);
+
+    let inventoryValue = 0;
+    /**
+     * Full at-cost opening stock ever added via initial batches (seller-style gross),
+     * including batches already sold out — needed so supplier “opening stock” due offsets equity.
+     */
+    let openingInventoryCapitalGrossFull = 0;
+    for (const b of batches) {
+      const totalC = toNum(b.totalCost);
+      if (b.batchType === 'initial') {
+        openingInventoryCapitalGrossFull += totalC;
+      }
+      if (b.availableQty <= 0) continue;
+      const initial = b.initialQty;
+      const unitFromBatch =
+        initial > 0 ? totalC / initial : toNum(b.purchaseCost);
+      const line = b.availableQty * unitFromBatch;
+      inventoryValue += line;
+    }
+
+    let supplierIdsForOiBranch: number[] | undefined;
+    if (bid != null) {
+      const [pSup, bSup] = await Promise.all([
+        this.prisma.purchase.findMany({
+          where: { branchId: bid, supplierId: { not: null } },
+          select: { supplierId: true },
+          distinct: ['supplierId'],
+        }),
+        this.prisma.batch.findMany({
+          where: {
+            batchType: 'initial',
+            storeProduct: { branchId: bid },
+          },
+          select: { supplierId: true },
+        }),
+      ]);
+      const ids = new Set<number>();
+      for (const r of pSup) {
+        if (r.supplierId != null) ids.add(r.supplierId);
+      }
+      for (const r of bSup) {
+        if (r.supplierId != null) ids.add(r.supplierId);
+      }
+      supplierIdsForOiBranch = [...ids];
+    }
+
+    const oiTxWhere: Prisma.SupplierTransactionWhereInput = {
+      type: SupplierTransactionType.DUE,
+      offsetsOpeningInventory: true,
+      ...(bid != null && supplierIdsForOiBranch && supplierIdsForOiBranch.length > 0
+        ? { supplierId: { in: supplierIdsForOiBranch } }
+        : {}),
+    };
+    const oiPostedAgg = await this.prisma.supplierTransaction.aggregate({
+      where: oiTxWhere,
       _sum: { amount: true },
     });
-    const totalLiabilities = debitResult._sum.amount ?? new Prisma.Decimal(0);
+    /** Cumulative posted “Funded from opening stock” supplier Due (full amount on supplier ledger). */
+    const openingInventorySupplierDuePostedTotal = toNum(oiPostedAgg._sum.amount);
+    /**
+     * Portion of that due that reduces opening-inventory equity (capped at gross opening stock at cost).
+     * Same meaning as seller-admin `openingInventoryCapitalSupplierDueOffset` on the TB payload.
+     */
+    const openingInventoryCapitalSupplierDueOffset = Math.min(
+      openingInventoryCapitalGrossFull,
+      openingInventorySupplierDuePostedTotal,
+    );
 
-    const ownersEquity = totalAssets.sub(totalLiabilities);
+    const openingInventoryCapitalGross = openingInventoryCapitalGrossFull;
+    const offsetApplied = openingInventoryCapitalSupplierDueOffset;
+    const openingInventoryCapital = Math.max(
+      0,
+      openingInventoryCapitalGrossFull - offsetApplied,
+    );
+    /**
+     * Posted OI due beyond recorded opening stock at cost stays in `supplierPayable`; apply same equity
+     * plug as before so A ≈ L + E (not shown as a second line in UI — seller caps the “Less” row only).
+     */
+    const excessOiDueOverOpeningInventoryGross = Math.max(
+      0,
+      openingInventorySupplierDuePostedTotal - openingInventoryCapitalGrossFull,
+    );
+    const supplierOpeningDueEquityAdjustment = -excessOiDueOverOpeningInventoryGross;
+
+    const saleForPnlWhere: Prisma.SaleWhereInput = {
+      status: { not: SaleStatus.RETURNED },
+      ...saleBranch,
+    };
+    const [cogsSold, returnCogs] = await Promise.all([
+      this.tbCogsFromSoldItems(saleForPnlWhere),
+      this.tbReturnCogs(saleReturnBranch),
+    ]);
+    const cogsNet = Math.max(0, cogsSold - returnCogs);
+
+    const salesGrand = toNum(salesRevAgg._sum.grandTotal);
+    const incomeTotal = toNum(incomeAgg._sum.amount);
+    const refundTotal = toNum(saleReturnAgg._sum.refundAmount);
+    const returnGainTotal = toNum(saleReturnAgg._sum.returnGain);
+    const operatingExpenses = toNum(expenseAgg._sum.amount);
+
+    /**
+     * Lifetime net result (aligned with profit report): sale revenue + posted income
+     * − customer refunds + return gain − **COGS from sold qty** (minus return COGS) − operating expenses.
+     */
+    const totalRevenue = salesGrand + incomeTotal - refundTotal + returnGainTotal;
+    const totalExpense = cogsNet + operatingExpenses;
+    const cumulativeNetProfit = totalRevenue - totalExpense;
+
+    const totalCash = liquidAccounts.reduce((s, a) => s + toNum(a.balance), 0);
+    const saleDue = toNum(salesDueAgg._sum.dueAmount);
+    const manualDue = toNum(manualDueAgg._sum.manualDue);
+    /** Invoice-level due (branch-scoped) + manual due (customer-level, not branch-scoped). */
+    const customerReceivable = saleDue + manualDue;
+
+    const supplierAdvanceReceivable = toNum(supplierAdvanceAgg._sum.advanceBalance);
+    const supplierPayable = toNum(supplierDueAgg._sum.totalDue);
+    const customerAdvance = toNum(customerAdvanceAgg._sum.totalAdvance);
+
+    const totalOpeningCapital = toNum(openingCapitalAgg._sum.openingBalance);
+    const netStockAdjustment = 0;
+    const totalProfitWithdrawn = 0;
+    const salaryAccrual = 0;
+    const retailerReceivable = 0;
+    const employeeAdvanceReceivable = 0;
+    const retailerAdvance = 0;
+    const salaryDue = 0;
+    const cashDepositPayable = 0;
+
+    const totalLiquidAndOpsAssets =
+      totalCash +
+      customerReceivable +
+      retailerReceivable +
+      employeeAdvanceReceivable +
+      supplierAdvanceReceivable +
+      inventoryValue;
+
+    const totalLiabilities =
+      supplierPayable +
+      customerAdvance +
+      retailerAdvance +
+      salaryDue +
+      cashDepositPayable;
+
+    const retainedEarnings =
+      cumulativeNetProfit - totalProfitWithdrawn - salaryAccrual;
+    const totalOwnerEquity =
+      totalOpeningCapital +
+      openingInventoryCapital +
+      netStockAdjustment +
+      retainedEarnings +
+      supplierOpeningDueEquityAdjustment;
+
+    const totalAssets = totalLiquidAndOpsAssets;
+    const netWorth = totalAssets - totalLiabilities;
+    const rawDifference = netWorth - totalOwnerEquity;
+    /** Same as seller-admin: positive magnitude only; balanced when &lt; 0.01. */
+    const difference = Math.abs(rawDifference);
+    const isBalanced = difference < 0.01;
+
+    const accountTypeLabel: Record<string, string> = {
+      CASH: 'Cash',
+      BANK: 'Bank',
+      MOBILE_BANKING: 'Mobile Banking',
+    };
+
+    const cashAccounts = liquidAccounts.map((a) => ({
+      id: String(a.id),
+      accountName: a.name,
+      accountType: accountTypeLabel[a.type] ?? a.type,
+      accountNumber: a.accountNumber ?? null,
+      balance: toNum(a.balance),
+      branch: { id: '0', name: bid != null ? `Branch #${bid}` : 'All branches' },
+    }));
 
     return {
-      accountsByType: grouped,
-      totalAssets,
-      totalLiabilities,
-      ownersEquity,
+      branchId: bid ?? null,
+      assets: {
+        cashAccounts,
+        totalCash,
+        customerReceivable,
+        customerInvoiceDue: saleDue,
+        customerManualDue: manualDue,
+        retailerReceivable,
+        inventoryValue,
+        employeeAdvanceReceivable,
+        supplierAdvanceReceivable,
+        totalAssets,
+      },
+      liabilities: {
+        supplierPayable,
+        customerAdvance,
+        retailerAdvance,
+        salaryDue,
+        cashDepositPayable,
+        totalLiabilities,
+      },
+      equity: {
+        totalOpeningCapital,
+        openingInventoryCapitalGross,
+        openingInventoryCapitalSupplierDueOffset,
+        openingInventorySupplierDuePostedTotal,
+        openingInventoryCapital,
+        netStockAdjustment,
+        totalRevenue,
+        totalExpense,
+        cumulativeNetProfit,
+        totalProfitWithdrawn,
+        retainedEarnings,
+        salaryAccrual,
+        totalOwnerEquity,
+      },
+      summary: {
+        totalAssets,
+        totalLiabilities,
+        netWorth,
+        totalOwnerEquity,
+        retainedEarnings,
+        difference,
+        isBalanced,
+      },
     };
   }
 

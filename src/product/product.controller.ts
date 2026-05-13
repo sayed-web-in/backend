@@ -128,6 +128,12 @@ export class ProductController {
     return this.productService.getBranchVariants(id);
   }
 
+  @UseGuards(JwtAuthGuard)
+  @Delete(':id/permanent')
+  permanentDelete(@Param('id', ParseIntPipe) id: number) {
+    return this.productService.permanentDeleteArchived(id);
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.productService.findOne(id);

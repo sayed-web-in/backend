@@ -58,6 +58,12 @@ export class ProductQueryDto extends PaginationDto {
   @IsOptional()
   @IsEnum(SellingType)
   sellingType?: SellingType;
+
+  /** When true, list archived products only (recycle bin / archive page). */
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  isArchived?: boolean;
 }
 
 export class StoreProductQueryDto extends PaginationDto {

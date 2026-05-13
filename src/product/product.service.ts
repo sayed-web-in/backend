@@ -243,7 +243,8 @@ export class ProductService {
     } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = { isArchived: false };
+    const onlyArchived = query.isArchived === true;
+    const where: any = onlyArchived ? { isArchived: true } : { isArchived: false };
 
     if (search) {
       where.OR = [
@@ -280,6 +281,8 @@ export class ProductService {
     const orderBy: any = {};
     if (sort) {
       orderBy[sort] = order;
+    } else if (onlyArchived) {
+      orderBy.updatedAt = 'desc';
     } else {
       orderBy.createdAt = order;
     }
@@ -848,6 +851,50 @@ export class ProductService {
       where: { id },
       data: { isArchived: false },
     });
+  }
+
+  /** Permanently remove an archived catalog product (no sales / orders / purchase lines). */
+  async permanentDeleteArchived(id: number) {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      select: { id: true, isArchived: true, name: true },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+    if (!product.isArchived) {
+      throw new BadRequestException(
+        'Only archived products can be permanently deleted. Archive the product first.',
+      );
+    }
+
+    const [saleN, orderN, purN] = await Promise.all([
+      this.prisma.saleItem.count({ where: { storeProduct: { productId: id } } }),
+      this.prisma.orderItem.count({ where: { storeProduct: { productId: id } } }),
+      this.prisma.purchaseItem.count({ where: { storeProduct: { productId: id } } }),
+    ]);
+    if (saleN + orderN + purN > 0) {
+      throw new BadRequestException(
+        'This product still has linked POS sales, ecommerce orders, or purchase lines. It cannot be permanently deleted.',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const stores = await tx.storeProduct.findMany({
+        where: { productId: id },
+        select: { id: true },
+      });
+      const storeIds = stores.map((s) => s.id);
+      if (storeIds.length > 0) {
+        await tx.serialNumber.deleteMany({
+          where: { batch: { storeProductId: { in: storeIds } } },
+        });
+        await tx.batch.deleteMany({ where: { storeProductId: { in: storeIds } } });
+      }
+      await tx.storeProduct.deleteMany({ where: { productId: id } });
+      await tx.productVariant.deleteMany({ where: { productId: id } });
+      await tx.product.delete({ where: { id } });
+    });
+
+    return { ok: true, id, name: product.name };
   }
 
   async getStoreProducts(query: StoreProductQueryDto) {

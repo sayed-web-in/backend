@@ -28,19 +28,9 @@ export class ReportController {
     return this.reportService.supplierReport(query);
   }
 
-  @Get('supplier-due')
-  supplierDueReport(@Query() query: ReportQueryDto) {
-    return this.reportService.supplierDueReport(query);
-  }
-
   @Get('customer')
   customerReport(@Query() query: ReportQueryDto) {
     return this.reportService.customerReport(query);
-  }
-
-  @Get('customer-due')
-  customerDueReport(@Query() query: ReportQueryDto) {
-    return this.reportService.customerDueReport(query);
   }
 
   @Get('product')

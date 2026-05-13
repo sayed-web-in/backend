@@ -232,6 +232,12 @@ export class SupplierService {
       dto.type === SupplierCustomTransactionType.due &&
       dto.offsetsOpeningInventory === true;
 
+    if (oiDue && dto.purchaseId != null) {
+      throw new BadRequestException(
+        'purchaseId must not be set for opening-stock funded supplier due',
+      );
+    }
+
     if (!oiDue && (!dto.accountId || dto.accountId < 1)) {
       throw new BadRequestException('accountId is required for this transaction');
     }
