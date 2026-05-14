@@ -14,6 +14,8 @@ import { OrderQueryDto } from './dto/order-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma, OrderStatus } from '@prisma/client';
 import { bdDayEndUtc, bdDayStartUtc } from '../common/bd-time.js';
+import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
+import { fifoConsumeBatchesForSaleLine } from '../common/sale-line-fifo-cost.js';
 
 @Injectable()
 export class OrderService {
@@ -300,7 +302,14 @@ export class OrderService {
     });
     if (!order) throw new NotFoundException('Order not found');
 
-    for (const item of order.items) {
+    const activeItems = order.items.filter((i) => !i.cancelled);
+    if (activeItems.length === 0) {
+      throw new BadRequestException(
+        'This order has no active lines to fulfil (all lines are cancelled)',
+      );
+    }
+
+    for (const item of activeItems) {
       if (item.storeProduct.branchId !== dto.branchId) {
         throw new BadRequestException(
           'All items must belong to the branch you select for fulfillment',
@@ -320,7 +329,7 @@ export class OrderService {
       imeiByOrderItemId.set(line.orderItemId, line);
     }
 
-    for (const item of order.items) {
+    for (const item of activeItems) {
       const hasImei = item.storeProduct.product.hasImei;
       const line = imeiByOrderItemId.get(item.id);
       if (hasImei) {
@@ -349,7 +358,10 @@ export class OrderService {
     return this.prisma.$transaction(async (tx) => {
       const invoiceNumber = this.generateInvoiceNumber();
       const paymentMethod = dto.paymentMethod ?? order.paymentMethod;
-      const grandTotal = order.totalAmount;
+      const grandTotal = activeItems.reduce(
+        (acc, i) => acc.add(i.total),
+        new Prisma.Decimal(0),
+      );
 
       const sale = await tx.sale.create({
         data: {
@@ -371,38 +383,40 @@ export class OrderService {
         },
       });
 
-      for (const item of order.items) {
+      const spIds = [...new Set(activeItems.map((i) => i.storeProductId))];
+      const fbMap = await avgPurchaseUnitCostByStoreProductIds(tx, spIds);
+      const spRows = await tx.storeProduct.findMany({
+        where: { id: { in: spIds } },
+        select: { id: true, averageCost: true },
+      });
+      const spAvgMap = new Map(
+        spRows.map((r) => [r.id, new Prisma.Decimal(r.averageCost)]),
+      );
+
+      for (const item of activeItems) {
         const itemTotal = item.unitPrice.mul(item.quantity);
         const hasImei = item.storeProduct.product.hasImei;
         const line = imeiByOrderItemId.get(item.id);
+        const fb = new Prisma.Decimal(fbMap.get(item.storeProductId) ?? 0);
+        const avgSnap =
+          spAvgMap.get(item.storeProductId) ?? new Prisma.Decimal(0);
+        /** Match seller-admin: line COGS from branch listing WAC, not per-batch FIFO $. */
+        const snapUnit = avgSnap.greaterThan(0) ? avgSnap : fb;
 
-        const saleItem = await tx.saleItem.create({
-          data: {
-            saleId: sale.id,
-            storeProductId: item.storeProductId,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            discount: 0,
-            total: itemTotal,
-          },
-        });
-
-        await tx.storeProduct.update({
-          where: { id: item.storeProductId },
-          data: { quantity: { decrement: item.quantity } },
-        });
+        let imeiRows: Array<{ batchId: number }> | null = null;
+        let imeiSerials: string[] = [];
 
         if (hasImei && line) {
-          const serials = [
+          imeiSerials = [
             ...new Set(
               line.serialNumbers.map((s) => String(s).trim()).filter(Boolean),
             ),
           ];
           const rows = await tx.serialNumber.findMany({
-            where: { serial: { in: serials } },
+            where: { serial: { in: imeiSerials } },
             include: { batch: true },
           });
-          if (rows.length !== serials.length) {
+          if (rows.length !== imeiSerials.length) {
             throw new BadRequestException(
               'One or more IMEI/serial numbers were not found',
             );
@@ -423,7 +437,36 @@ export class OrderService {
               throw new BadRequestException(`Duplicate serial: ${row.serial}`);
             }
             seen.add(row.serial);
+          }
+          imeiRows = rows.map((r) => ({ batchId: r.batchId }));
+        } else {
+          await fifoConsumeBatchesForSaleLine(
+            tx,
+            item.storeProductId,
+            item.quantity,
+            fb,
+          );
+        }
 
+        const saleItem = await tx.saleItem.create({
+          data: {
+            saleId: sale.id,
+            storeProductId: item.storeProductId,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            discount: 0,
+            total: itemTotal,
+            costPrice: snapUnit.toDecimalPlaces(6),
+          },
+        });
+
+        await tx.storeProduct.update({
+          where: { id: item.storeProductId },
+          data: { quantity: { decrement: item.quantity } },
+        });
+
+        if (imeiRows) {
+          for (const row of imeiRows) {
             await tx.batch.update({
               where: { id: row.batchId },
               data: {
@@ -434,28 +477,9 @@ export class OrderService {
           }
 
           await tx.serialNumber.updateMany({
-            where: { serial: { in: serials } },
+            where: { serial: { in: imeiSerials } },
             data: { status: 'SOLD', saleItemId: saleItem.id },
           });
-        } else {
-          const batch = await tx.batch.findFirst({
-            where: {
-              storeProductId: item.storeProductId,
-              availableQty: { gt: 0 },
-            },
-            orderBy: { createdAt: 'desc' },
-          });
-
-          if (batch) {
-            const deductQty = Math.min(batch.availableQty, item.quantity);
-            await tx.batch.update({
-              where: { id: batch.id },
-              data: {
-                availableQty: { decrement: deductQty },
-                soldQty: { increment: deductQty },
-              },
-            });
-          }
         }
       }
 
@@ -538,6 +562,11 @@ export class OrderService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      await tx.orderItem.updateMany({
+        where: { orderId: id },
+        data: { cancelled: true },
+      });
+
       await tx.orderTracking.create({
         data: {
           orderId: id,
@@ -555,5 +584,73 @@ export class OrderService {
         },
       });
     });
+  }
+
+  async cancelOrderItem(orderId: number, itemId: number) {
+    const line = await this.prisma.orderItem.findFirst({
+      where: { id: itemId, orderId },
+      include: {
+        order: { include: { sale: true } },
+      },
+    });
+    if (!line) {
+      throw new NotFoundException('Order line not found');
+    }
+
+    const { order } = line;
+    if (order.sale) {
+      throw new BadRequestException(
+        'Cannot cancel order lines after the order is converted to a sale',
+      );
+    }
+    if (order.status === OrderStatus.DELIVERED) {
+      throw new BadRequestException('Cannot cancel lines on a delivered order');
+    }
+    if (order.status === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Order is already fully cancelled');
+    }
+    if (line.cancelled) {
+      throw new BadRequestException('This line is already cancelled');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderItem.update({
+        where: { id: itemId },
+        data: { cancelled: true },
+      });
+
+      const remaining = await tx.orderItem.findMany({
+        where: { orderId, cancelled: false },
+      });
+      const newTotal = remaining.reduce(
+        (acc, row) => acc.add(row.total),
+        new Prisma.Decimal(0),
+      );
+
+      if (remaining.length === 0) {
+        await tx.orderTracking.create({
+          data: {
+            orderId,
+            status: OrderStatus.CANCELLED,
+            note: 'All items cancelled',
+          },
+        });
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.CANCELLED,
+            totalAmount: newTotal,
+          },
+        });
+        return;
+      }
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { totalAmount: newTotal },
+      });
+    });
+
+    return this.findOne(orderId);
   }
 }

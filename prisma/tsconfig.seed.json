@@ -7,5 +7,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["seed.ts"]
+  "include": ["seed.ts", "seed-storefront-content.ts"]
 }

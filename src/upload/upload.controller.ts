@@ -35,6 +35,18 @@ const bannerStorage = diskStorage({
   },
 });
 
+const logoStorage = diskStorage({
+  destination: (_req, _file, cb) => {
+    const logoDir = join(process.cwd(), 'uploads', 'logo');
+    mkdirSync(logoDir, { recursive: true });
+    cb(null, logoDir);
+  },
+  filename: (_req, file, cb) => {
+    const uniqueName = `${uuidv4()}${extname(file.originalname) || '.bin'}`;
+    cb(null, uniqueName);
+  },
+});
+
 @Controller('upload')
 @UseGuards(JwtAuthGuard)
 export class UploadController {
@@ -44,6 +56,18 @@ export class UploadController {
   @UseInterceptors(FileInterceptor('file', { storage }))
   uploadSingle(@UploadedFile() file: Express.Multer.File) {
     return { url: `/uploads/${file.filename}`, filename: file.filename };
+  }
+
+  /** Storefront header logo → `uploads/logo/` on disk, public URL `/uploads/logo/...`. */
+  @Post('logo')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: logoStorage,
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  uploadLogo(@UploadedFile() file: Express.Multer.File) {
+    return { url: `/uploads/logo/${file.filename}`, filename: file.filename };
   }
 
   @Post('multiple')

@@ -135,8 +135,15 @@ export class ProductController {
   }
 
   @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.productService.findOne(id);
+  findOne(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('forWebsite') forWebsite?: string,
+  ) {
+    const web =
+      forWebsite === 'true' ||
+      forWebsite === '1' ||
+      forWebsite === 'yes';
+    return this.productService.findOne(id, web);
   }
 
   @UseGuards(JwtAuthGuard)

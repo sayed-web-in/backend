@@ -9,6 +9,7 @@ import { CreateTransferDto } from './dto/create-transfer.dto.js';
 import { StockQueryDto } from './dto/stock-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
+import { weightedAverageCostAfterPurchase } from '../common/store-product-wac.js';
 
 @Injectable()
 export class StockService {
@@ -207,7 +208,12 @@ export class StockService {
           remaining -= deductQty;
         }
 
-        // Find or create StoreProduct at destination branch
+        const unitMoved = new Prisma.Decimal(sourceProduct.averageCost).greaterThan(
+          0,
+        )
+          ? new Prisma.Decimal(sourceProduct.averageCost)
+          : new Prisma.Decimal(latestCost);
+
         let destProduct = await tx.storeProduct.findFirst({
           where: {
             productId: sourceProduct.productId,
@@ -224,6 +230,7 @@ export class StockService {
               branchId: dto.toBranchId,
               quantity: 0,
               sellingPrice: sourceProduct.sellingPrice,
+              averageCost: new Prisma.Decimal(0),
               discountType: sourceProduct.discountType,
               discountValue: sourceProduct.discountValue,
               quantityAlert: sourceProduct.quantityAlert,
@@ -232,9 +239,22 @@ export class StockService {
           });
         }
 
+        const destPrevQty = destProduct.quantity;
+        const destPrevAvg = new Prisma.Decimal(destProduct.averageCost);
+        const movedQ = item.quantity;
+        const mergedAvg = weightedAverageCostAfterPurchase(
+          destPrevQty,
+          destPrevAvg,
+          movedQ,
+          unitMoved,
+        );
+
         await tx.storeProduct.update({
           where: { id: destProduct.id },
-          data: { quantity: { increment: item.quantity } },
+          data: {
+            quantity: { increment: movedQ },
+            averageCost: mergedAvg.toDecimalPlaces(6),
+          },
         });
 
         await tx.batch.create({
@@ -243,8 +263,8 @@ export class StockService {
             batchType: 'transfer',
             initialQty: item.quantity,
             availableQty: item.quantity,
-            purchaseCost: latestCost,
-            totalCost: latestCost.mul(new Prisma.Decimal(item.quantity)),
+            purchaseCost: unitMoved.toDecimalPlaces(2),
+            totalCost: unitMoved.mul(new Prisma.Decimal(item.quantity)),
             storeProductId: destProduct.id,
           },
         });

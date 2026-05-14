@@ -42,6 +42,11 @@ export class UpdateStoreProductDto {
   @IsBoolean()
   isFeatured?: boolean;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  averageCost?: number;
+
   /**
    * Applied only when this store product has exactly one batch and that batch has soldQty === 0.
    * Updates batch purchaseCost and totalCost (totalCost = purchaseCost * initialQty).

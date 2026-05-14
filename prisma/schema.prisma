@@ -314,6 +314,8 @@ model StoreProduct {
   productVariantId Int?
   branchId         Int
   quantity         Int             @default(0)
+  /// Moving weighted-average purchase cost for this branch SKU (seller `product_variants.averageCost`); snapshot on sale lines as `costPrice`.
+  averageCost      Decimal         @default(0) @db.Decimal(14, 6)
   sellingPrice     Decimal         @db.Decimal(12, 2)
   discountType     DiscountType?
   discountValue    Decimal?        @db.Decimal(12, 2)
@@ -492,6 +494,8 @@ model SaleItem {
   unitPrice      Decimal        @db.Decimal(12, 2)
   discount       Decimal        @default(0) @db.Decimal(12, 2)
   total          Decimal        @db.Decimal(12, 2)
+  /// Seller-admin `sale_items.costPrice`: frozen COGS per line (WAC snapshot at sale).
+  costPrice      Decimal        @default(0) @db.Decimal(14, 6)
   sale           Sale           @relation(fields: [saleId], references: [id], onDelete: Cascade)
   storeProduct   StoreProduct   @relation(fields: [storeProductId], references: [id])
   serialNumbers  SerialNumber[]
@@ -659,6 +663,7 @@ model OrderItem {
   quantity       Int
   unitPrice      Decimal      @db.Decimal(12, 2)
   total          Decimal      @db.Decimal(12, 2)
+  cancelled      Boolean      @default(false)
   order          Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
   storeProduct   StoreProduct @relation(fields: [storeProductId], references: [id])
 
@@ -903,7 +908,6 @@ model Article {
   id        Int      @id @default(autoincrement())
   title     String
   slug      String   @unique
-  image     String?
   content   String   @db.LongText
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())

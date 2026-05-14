@@ -4,10 +4,6 @@ export class CreateArticleDto {
   @IsString()
   title: string;
 
-  @IsOptional()
-  @IsString()
-  image?: string;
-
   @IsString()
   content: string;
 

@@ -77,16 +77,42 @@ export class ProfitLossReportService {
       select: {
         quantity: true,
         storeProductId: true,
+        costPrice: true,
         sale: { select: { createdAt: true } },
       },
     });
     const cogsMonthly = Array.from({ length: 12 }, () => 0);
     if (yearSaleItems.length > 0) {
-      const storeIds = [...new Set(yearSaleItems.map((i) => i.storeProductId))];
-      const costMap = await this.costing.avgUnitCostByStoreProduct(storeIds);
+      const needFb = yearSaleItems.filter(
+        (i) => !i.costPrice || Number(i.costPrice) <= 0,
+      );
+      const storeIds = [...new Set(needFb.map((i) => i.storeProductId))];
+      const spRows =
+        storeIds.length > 0
+          ? await this.prisma.storeProduct.findMany({
+              where: { id: { in: storeIds } },
+              select: { id: true, averageCost: true },
+            })
+          : [];
+      const spAvgMap = new Map(
+        spRows.map((r) => [r.id, Number(r.averageCost)]),
+      );
+      const stillNeedBatch = storeIds.filter(
+        (id) => (spAvgMap.get(id) ?? 0) <= 0,
+      );
+      const costMap =
+        stillNeedBatch.length > 0
+          ? await this.costing.avgUnitCostByStoreProduct(stillNeedBatch)
+          : new Map<number, number>();
       for (const it of yearSaleItems) {
         const m = it.sale.createdAt.getMonth();
-        cogsMonthly[m] += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+        const uc =
+          it.costPrice != null && Number(it.costPrice) > 0
+            ? Number(it.costPrice)
+            : (spAvgMap.get(it.storeProductId) ?? 0) > 0
+              ? (spAvgMap.get(it.storeProductId) ?? 0)
+              : (costMap.get(it.storeProductId) ?? 0);
+        cogsMonthly[m] += it.quantity * uc;
       }
     }
 

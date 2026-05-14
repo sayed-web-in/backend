@@ -1,59 +1,60 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
 
 @Injectable()
 export class ReportCostingService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Estimated unit cost per store line (avg batch purchaseCost, then avg purchase unitCost).
-   * Matches product-transaction / POS cost lines when batches exist.
+   * Estimated unit cost per store line (quantity-weighted batch cost, then purchase receipts).
    */
   async avgUnitCostByStoreProduct(
     storeProductIds: number[],
   ): Promise<Map<number, number>> {
-    const map = new Map<number, number>();
-    if (storeProductIds.length === 0) return map;
-
-    const batchAvgs = await this.prisma.batch.groupBy({
-      by: ['storeProductId'],
-      where: { storeProductId: { in: storeProductIds } },
-      _avg: { purchaseCost: true },
-    });
-    for (const row of batchAvgs) {
-      map.set(row.storeProductId, Number(row._avg.purchaseCost ?? 0));
-    }
-
-    const missing = storeProductIds.filter((id) => (map.get(id) ?? 0) <= 0);
-    if (missing.length === 0) return map;
-
-    const purchaseAvgs = await this.prisma.purchaseItem.groupBy({
-      by: ['storeProductId'],
-      where: { storeProductId: { in: missing } },
-      _avg: { unitCost: true },
-    });
-    for (const row of purchaseAvgs) {
-      const v = Number(row._avg.unitCost ?? 0);
-      if (v > 0) map.set(row.storeProductId, v);
-    }
-    return map;
+    return avgPurchaseUnitCostByStoreProductIds(this.prisma, storeProductIds);
   }
 
-  /** COGS for the period: Σ sale line qty × unit cost (not “purchases in period”). */
+  /** COGS for the period: Σ sale line qty × frozen `costPrice` (seller); legacy lines fall back. */
   async cogsFromSoldItemsForSaleWhere(
     saleWhere: Prisma.SaleWhereInput,
   ): Promise<number> {
     const items = await this.prisma.saleItem.findMany({
       where: { sale: saleWhere },
-      select: { storeProductId: true, quantity: true },
+      select: { storeProductId: true, quantity: true, costPrice: true },
     });
     if (items.length === 0) return 0;
-    const storeIds = [...new Set(items.map((i) => i.storeProductId))];
-    const costMap = await this.avgUnitCostByStoreProduct(storeIds);
+    const needFallback = items.filter(
+      (i) => !i.costPrice || Number(i.costPrice) <= 0,
+    );
+    const storeIds = [...new Set(needFallback.map((i) => i.storeProductId))];
+    const spRows =
+      storeIds.length > 0
+        ? await this.prisma.storeProduct.findMany({
+            where: { id: { in: storeIds } },
+            select: { id: true, averageCost: true },
+          })
+        : [];
+    const spAvgMap = new Map(
+      spRows.map((r) => [r.id, Number(r.averageCost)]),
+    );
+    const stillNeedBatch = storeIds.filter(
+      (id) => (spAvgMap.get(id) ?? 0) <= 0,
+    );
+    const fbMap =
+      stillNeedBatch.length > 0
+        ? await this.avgUnitCostByStoreProduct(stillNeedBatch)
+        : new Map<number, number>();
     let sum = 0;
     for (const it of items) {
-      sum += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+      const frozen =
+        it.costPrice != null && Number(it.costPrice) > 0
+          ? Number(it.costPrice)
+          : (spAvgMap.get(it.storeProductId) ?? 0) > 0
+            ? (spAvgMap.get(it.storeProductId) ?? 0)
+            : (fbMap.get(it.storeProductId) ?? 0);
+      sum += it.quantity * frozen;
     }
     return sum;
   }

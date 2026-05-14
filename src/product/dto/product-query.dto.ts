@@ -64,6 +64,16 @@ export class ProductQueryDto extends PaginationDto {
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   isArchived?: boolean;
+
+  /**
+   * Website catalog: only products that have at least one active store SKU with
+   * sellingType ONLINE or BOTH, and nested storeProducts are filtered the same.
+   * Omit for POS / internal (shows STORE-only listings too).
+   */
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  forWebsite?: boolean;
 }
 
 export class StoreProductQueryDto extends PaginationDto {

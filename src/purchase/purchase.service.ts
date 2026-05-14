@@ -10,6 +10,7 @@ import { PurchaseQueryDto } from './dto/purchase-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
 import { bdDayEndUtc, bdDayStartUtc } from '../common/bd-time.js';
+import { weightedAverageCostAfterPurchase } from '../common/store-product-wac.js';
 
 @Injectable()
 export class PurchaseService {
@@ -208,26 +209,22 @@ export class PurchaseService {
           );
         }
 
-        // Seller-style weighted average on store line: (prevQty × prevAvg + newQty × unitCost) / totalQty.
-        // Here `sellingPrice` is the branch SKU average purchase cost (see admin inventory UI).
         const prevQty = storeProduct.quantity;
-        const prevAvgCost = new Prisma.Decimal(storeProduct.sellingPrice);
+        const prevAvg = new Prisma.Decimal(storeProduct.averageCost);
         const addQty = item.quantity;
-        const addUnitCost = new Prisma.Decimal(item.unitCost);
-        const totalQtyAfter = prevQty + addQty;
-        const weightedAvgCost =
-          totalQtyAfter > 0
-            ? prevAvgCost
-                .mul(new Prisma.Decimal(prevQty))
-                .add(addUnitCost.mul(new Prisma.Decimal(addQty)))
-                .div(new Prisma.Decimal(totalQtyAfter))
-            : addUnitCost;
+        const addUnit = new Prisma.Decimal(item.unitCost);
+        const newAvg = weightedAverageCostAfterPurchase(
+          prevQty,
+          prevAvg,
+          addQty,
+          addUnit,
+        );
 
         await tx.storeProduct.update({
           where: { id: item.storeProductId },
           data: {
             quantity: { increment: item.quantity },
-            sellingPrice: weightedAvgCost.toDecimalPlaces(2),
+            averageCost: newAvg.toDecimalPlaces(6),
           },
         });
 

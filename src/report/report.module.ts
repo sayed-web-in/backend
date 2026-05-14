@@ -27,6 +27,6 @@ import { SupplierReportService } from './services/supplier-report.service.js';
     ProfitLossReportService,
     ReportService,
   ],
-  exports: [ReportService],
+  exports: [ReportService, ReportCostingService],
 })
 export class ReportModule {}

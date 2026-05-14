@@ -15,6 +15,7 @@ import {
 } from './dto/product-query.dto.js';
 import { PriceListQueryDto } from './dto/price-list-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
+import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
 import { Prisma, ProductType, ProductStatus } from '@prisma/client';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
@@ -22,6 +23,12 @@ import { join } from 'path';
 @Injectable()
 export class ProductService {
   constructor(private prisma: PrismaService) {}
+
+  /** Public storefront: counter-only (STORE) SKUs must not appear. */
+  private readonly webStoreProductWhere: Prisma.StoreProductWhereInput = {
+    isActive: true,
+    sellingType: { in: ['ONLINE', 'BOTH'] },
+  };
 
   private toUploadsFsPath(url?: string | null): string | null {
     if (!url) return null;
@@ -164,6 +171,7 @@ export class ProductService {
           productVariantId: dto.productVariantId,
           branchId: dto.branchId,
           quantity: dto.quantity,
+          averageCost: new Prisma.Decimal(dto.purchaseCost).toDecimalPlaces(6),
           sellingPrice: dto.sellingPrice,
           discountType: dto.discountType,
           discountValue: dto.discountValue,
@@ -238,6 +246,7 @@ export class ProductService {
       priceMax,
       branchId,
       sellingType,
+      forWebsite,
       sort,
       order = 'desc',
     } = query;
@@ -245,6 +254,7 @@ export class ProductService {
 
     const onlyArchived = query.isArchived === true;
     const where: any = onlyArchived ? { isArchived: true } : { isArchived: false };
+    const useWebCatalog = forWebsite === true && !onlyArchived;
 
     if (search) {
       where.OR = [
@@ -255,17 +265,25 @@ export class ProductService {
     if (categoryId) where.categoryId = categoryId;
     if (subCategoryId) where.subCategoryId = subCategoryId;
     if (brandId) where.brandId = brandId;
-    if (status) where.status = status;
+    if (useWebCatalog) {
+      where.status = ProductStatus.ACTIVE;
+    } else if (status) {
+      where.status = status;
+    }
 
     if (
+      useWebCatalog ||
       isBestDeal !== undefined ||
       isFeatured !== undefined ||
       priceMin ||
       priceMax ||
       branchId ||
-      sellingType
+      (sellingType != null && !useWebCatalog)
     ) {
-      const storeWhere: any = {};
+      const storeWhere: Prisma.StoreProductWhereInput = {};
+      if (useWebCatalog) {
+        Object.assign(storeWhere, this.webStoreProductWhere);
+      }
       if (isBestDeal !== undefined) storeWhere.isBestDeal = isBestDeal;
       if (isFeatured !== undefined) storeWhere.isFeatured = isFeatured;
       if (priceMin || priceMax) {
@@ -274,7 +292,9 @@ export class ProductService {
         if (priceMax) storeWhere.sellingPrice.lte = priceMax;
       }
       if (branchId) storeWhere.branchId = branchId;
-      if (sellingType) storeWhere.sellingType = sellingType;
+      if (sellingType != null && !useWebCatalog) {
+        storeWhere.sellingType = sellingType;
+      }
       where.storeProducts = { some: storeWhere };
     }
 
@@ -303,6 +323,7 @@ export class ProductService {
             select: { image: true },
           },
           storeProducts: {
+            ...(useWebCatalog ? { where: this.webStoreProductWhere } : {}),
             include: {
               branch: true,
               productVariant: {
@@ -329,9 +350,15 @@ export class ProductService {
     return paginate(data, total, page, limit);
   }
 
-  async findOne(id: number) {
-    const product = await this.prisma.product.findUnique({
-      where: { id },
+  async findOne(id: number, forWebsite = false) {
+    const product = await this.prisma.product.findFirst({
+      where: forWebsite
+        ? {
+            id,
+            isArchived: false,
+            status: ProductStatus.ACTIVE,
+          }
+        : { id },
       include: {
         category: {
           include: { branches: { include: { branch: true } } },
@@ -352,6 +379,7 @@ export class ProductService {
           },
         },
         storeProducts: {
+          ...(forWebsite ? { where: this.webStoreProductWhere } : {}),
           include: {
             branch: true,
             productVariant: true,
@@ -365,8 +393,12 @@ export class ProductService {
   }
 
   async findBySlug(slug: string) {
-    const product = await this.prisma.product.findUnique({
-      where: { slug },
+    const product = await this.prisma.product.findFirst({
+      where: {
+        slug,
+        isArchived: false,
+        status: ProductStatus.ACTIVE,
+      },
       include: {
         category: true,
         subCategory: true,
@@ -383,13 +415,13 @@ export class ProductService {
               },
             },
             storeProducts: {
-              where: { isActive: true },
+              where: this.webStoreProductWhere,
               include: { branch: true },
             },
           },
         },
         storeProducts: {
-          where: { isActive: true },
+          where: this.webStoreProductWhere,
           include: { branch: true },
         },
       },
@@ -641,6 +673,8 @@ export class ProductService {
     const updateData: Prisma.StoreProductUpdateInput = {};
     if (dto.sellingPrice !== undefined)
       updateData.sellingPrice = dto.sellingPrice;
+    if (dto.averageCost !== undefined)
+      updateData.averageCost = dto.averageCost;
     if (dto.discountType !== undefined)
       updateData.discountType = dto.discountType;
     if (dto.discountValue !== undefined)
@@ -672,6 +706,7 @@ export class ProductService {
           totalCost,
         },
       });
+      updateData.averageCost = unit;
     }
 
     return this.prisma.storeProduct.update({
@@ -952,7 +987,20 @@ export class ProductService {
       this.prisma.storeProduct.count({ where }),
     ]);
 
-    return paginate(data, total, page, limit);
+    const ids = data.map((r) => r.id);
+    const costMap =
+      ids.length > 0
+        ? await avgPurchaseUnitCostByStoreProductIds(this.prisma, ids)
+        : new Map<number, number>();
+    const enriched = data.map((row) => ({
+      ...row,
+      avgPurchaseUnitCost:
+        Number(row.averageCost) > 0
+          ? Number(row.averageCost)
+          : costMap.get(row.id) ?? 0,
+    }));
+
+    return paginate(enriched, total, page, limit);
   }
 
   async getPriceList(query: PriceListQueryDto) {
@@ -1015,20 +1063,10 @@ export class ProductService {
     const idList = pageSlice.map((x) => x.id);
 
     const allIds = filtered.map((x) => x.id);
-    const costAggAll =
+    const costMapAll =
       allIds.length > 0
-        ? await this.prisma.batch.groupBy({
-            by: ['storeProductId'],
-            where: { storeProductId: { in: allIds } },
-            _avg: { purchaseCost: true },
-          })
-        : [];
-    const costMapAll = new Map(
-      costAggAll.map((c) => [
-        c.storeProductId,
-        Number(c._avg.purchaseCost ?? 0),
-      ]),
-    );
+        ? await avgPurchaseUnitCostByStoreProductIds(this.prisma, allIds)
+        : new Map<number, number>();
 
     let totalPurchaseValue = 0;
     let totalSellingValue = 0;
@@ -1055,18 +1093,6 @@ export class ProductService {
         },
       };
     }
-
-    const costAggPage = await this.prisma.batch.groupBy({
-      by: ['storeProductId'],
-      where: { storeProductId: { in: idList } },
-      _avg: { purchaseCost: true },
-    });
-    const costMapPage = new Map(
-      costAggPage.map((c) => [
-        c.storeProductId,
-        Number(c._avg.purchaseCost ?? 0),
-      ]),
-    );
 
     const fullRows = await this.prisma.storeProduct.findMany({
       where: { id: { in: idList } },
@@ -1103,7 +1129,7 @@ export class ProductService {
         ? attrs.join(', ')
         : v?.sku || p.sku || '';
       const sku = v?.sku || p.sku || '';
-      const purchasePrice = costMapPage.get(sp.id) ?? 0;
+      const purchasePrice = costMapAll.get(sp.id) ?? 0;
       const productType =
         p.type === 'VARIABLE' ? 'variable' : 'single';
       const productImage = p.images?.[0]?.url ?? '';
@@ -1274,7 +1300,11 @@ export class ProductService {
 
   async getSitemapProducts() {
     return this.prisma.product.findMany({
-      where: { status: 'ACTIVE', isArchived: false },
+      where: {
+        status: 'ACTIVE',
+        isArchived: false,
+        storeProducts: { some: this.webStoreProductWhere },
+      },
       select: { slug: true, updatedAt: true },
     });
   }
@@ -1286,6 +1316,7 @@ export class ProductService {
       OR: [{ name: { contains: query } }, { description: { contains: query } }],
     };
     if (categoryId) where.categoryId = categoryId;
+    where.storeProducts = { some: this.webStoreProductWhere };
 
     const products = await this.prisma.product.findMany({
       where,
@@ -1299,7 +1330,7 @@ export class ProductService {
         category: true,
         brand: true,
         storeProducts: {
-          where: { isActive: true, sellingType: { in: ['ONLINE', 'BOTH'] } },
+          where: this.webStoreProductWhere,
           include: { productVariant: { select: { image: true } } },
           take: 1,
         },

@@ -73,7 +73,6 @@ export class ArticleService {
       data: {
         title: dto.title,
         slug,
-        image: dto.image,
         content: dto.content,
         isActive: dto.isActive ?? true,
       },

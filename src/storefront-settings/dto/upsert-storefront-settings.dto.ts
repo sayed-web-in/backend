@@ -4,7 +4,6 @@ import {
   IsEnum,
   IsOptional,
   IsString,
-  IsUrl,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -53,7 +52,7 @@ export class UpsertStorefrontSettingsDto {
   brandName?: string;
 
   @IsOptional()
-  @IsUrl()
+  @IsString()
   @MaxLength(500)
   brandLogoUrl?: string;
 

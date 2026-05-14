@@ -83,6 +83,15 @@ export class OrderController {
     return this.orderService.completeOrder(id, dto);
   }
 
+  @Post(':id/items/:itemId/cancel')
+  @UseGuards(JwtAuthGuard)
+  cancelOrderItem(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('itemId', ParseIntPipe) itemId: number,
+  ) {
+    return this.orderService.cancelOrderItem(id, itemId);
+  }
+
   @Post(':id/cancel')
   @UseGuards(JwtAuthGuard)
   cancelOrder(@Param('id', ParseIntPipe) id: number) {

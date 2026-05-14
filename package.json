@@ -26,6 +26,7 @@
     "db:seed:faqs": "ts-node --project prisma/tsconfig.seed.json prisma/seed-faqs.ts",
     "db:seed:short-features": "ts-node --project prisma/tsconfig.seed.json prisma/seed-short-features.ts",
     "db:seed:storefront-settings": "ts-node --project prisma/tsconfig.seed.json prisma/seed-storefront-settings.ts",
+    "db:seed:storefront-content": "ts-node --project prisma/tsconfig.seed.json prisma/seed-storefront-content.ts",
     "postinstall": "prisma generate"
   },
   "prisma": {

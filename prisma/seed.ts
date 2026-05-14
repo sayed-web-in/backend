@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { PrismaClient, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { seedStorefrontContent } from './seed-storefront-content';
 
 const prisma = new PrismaClient();
 
@@ -112,6 +113,8 @@ async function main() {
   console.log(`Seeded categories: ${categories.length} (${createdCategoryCount} created, ${categories.length - createdCategoryCount} updated)`);
   console.log(`Seeded subcategories: ${createdSubCategoryCount + updatedSubCategoryCount} (${createdSubCategoryCount} created, ${updatedSubCategoryCount} updated)`);
   console.log('Use these credentials to log in to the admin panel (set ADMIN_EMAIL / ADMIN_PASSWORD in .env to override defaults).');
+
+  await seedStorefrontContent(prisma);
 }
 
 main()

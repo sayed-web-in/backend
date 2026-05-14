@@ -5,7 +5,6 @@ const prisma = new PrismaClient();
 
 type SeedArticle = {
   title: string;
-  image: string;
   content: string;
   isActive?: boolean;
 };
@@ -13,28 +12,24 @@ type SeedArticle = {
 const articles: SeedArticle[] = [
   {
     title: 'Authentic Mobile Phones, Laptops, Gadgets in Bangladesh',
-    image: '/uploads/articles/authentic-tech-bd.jpg',
     content:
       '<p>Looking for real mobile phones, laptops, and gadgets in Bangladesh? Choose Future Technology for trusted tech products. We offer official and authentic devices with proper warranty support and transparent pricing.</p><p>From flagship smartphones to reliable student laptops, our catalog is curated for daily users, gamers, creators, and professionals. Buy online or visit our outlet for hands-on support.</p>',
     isActive: true,
   },
   {
     title: 'Popular Gaming Phone Laptop Retail & Online Shop in Bangladesh',
-    image: '/uploads/articles/gaming-phones-laptops.jpg',
     content:
       '<p>Welcome to Future Technology, a reliable online and physical store for Bangladesh\'s latest and authentic gaming devices. Find high-refresh gaming phones, RTX-powered laptops, and premium peripherals for pro-level performance.</p><p>We help you choose based on budget and use case with clear specs, after-sales service, and fast nationwide delivery.</p>',
     isActive: true,
   },
   {
     title: 'Best Laptop & MacBook Shop in Bangladesh',
-    image: '/uploads/articles/laptop-macbook-shop.jpg',
     content:
       '<p>Future Technology is one of the top destinations in Bangladesh for laptops and MacBooks. Whether you are a freelancer, office professional, student, or gamer, we maintain options across all price segments.</p><p>Get expert guidance, verified configuration, and smooth service support so you can buy with confidence.</p>',
     isActive: true,
   },
   {
     title: 'Conclusion: Where to Buy Genuine Tech in Bangladesh',
-    image: '/uploads/articles/conclusion-tech.jpg',
     content:
       '<p>Future Technology offers strong value on smartphones, laptops, Apple products, accessories, and everyday gadgets in Bangladesh. Explore our online store for updated pricing, official products, and dependable support.</p>',
     isActive: true,
@@ -66,7 +61,6 @@ async function main() {
         where: { id: existing.id },
         data: {
           title: row.title,
-          image: row.image,
           content: row.content,
           isActive: row.isActive ?? true,
         },
@@ -79,7 +73,6 @@ async function main() {
       data: {
         title: row.title,
         slug,
-        image: row.image,
         content: row.content,
         isActive: row.isActive ?? true,
       },

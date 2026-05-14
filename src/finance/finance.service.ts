@@ -20,10 +20,15 @@ import {
   bdDayStartUtc,
   yearMonthKeyBd,
 } from '../common/bd-time.js';
+import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
+import { ReportCostingService } from '../report/report-costing.service.js';
 
 @Injectable()
 export class FinanceService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly reportCosting: ReportCostingService,
+  ) {}
 
   private expenseWhereFromQuery(query: FinanceQueryDto) {
     const { categoryId, branchId, dateFrom, dateTo, search } = query;
@@ -758,35 +763,9 @@ export class FinanceService {
 
   // ─── REPORTS ───────────────────────────────────────────────
 
-  /** Same cost basis as `ReportService` P&amp;L (batch avg → purchase item avg). */
-  private async tbAvgUnitCostByStoreProduct(
-    storeProductIds: number[],
-  ): Promise<Map<number, number>> {
-    const map = new Map<number, number>();
-    if (storeProductIds.length === 0) return map;
-
-    const batchAvgs = await this.prisma.batch.groupBy({
-      by: ['storeProductId'],
-      where: { storeProductId: { in: storeProductIds } },
-      _avg: { purchaseCost: true },
-    });
-    for (const row of batchAvgs) {
-      map.set(row.storeProductId, Number(row._avg.purchaseCost ?? 0));
-    }
-
-    const missing = storeProductIds.filter((id) => (map.get(id) ?? 0) <= 0);
-    if (missing.length === 0) return map;
-
-    const purchaseAvgs = await this.prisma.purchaseItem.groupBy({
-      by: ['storeProductId'],
-      where: { storeProductId: { in: missing } },
-      _avg: { unitCost: true },
-    });
-    for (const row of purchaseAvgs) {
-      const v = Number(row._avg.unitCost ?? 0);
-      if (v > 0) map.set(row.storeProductId, v);
-    }
-    return map;
+  /** Same cost basis as reports: Σ batch cost / Σ batch initial qty, then purchase lines. */
+  private tbAvgUnitCostByStoreProduct(storeProductIds: number[]) {
+    return avgPurchaseUnitCostByStoreProductIds(this.prisma, storeProductIds);
   }
 
   /** COGS from sale lines: Σ qty × unit cost (not purchase receipts in period). */
@@ -795,14 +774,36 @@ export class FinanceService {
   ): Promise<number> {
     const items = await this.prisma.saleItem.findMany({
       where: { sale: saleWhere },
-      select: { storeProductId: true, quantity: true },
+      select: { storeProductId: true, quantity: true, costPrice: true },
     });
     if (items.length === 0) return 0;
-    const storeIds = [...new Set(items.map((i) => i.storeProductId))];
-    const costMap = await this.tbAvgUnitCostByStoreProduct(storeIds);
+    const needFallback = items.filter(
+      (i) => !i.costPrice || Number(i.costPrice) <= 0,
+    );
+    const storeIds = [...new Set(needFallback.map((i) => i.storeProductId))];
+    const spRows =
+      storeIds.length > 0
+        ? await this.prisma.storeProduct.findMany({
+            where: { id: { in: storeIds } },
+            select: { id: true, averageCost: true },
+          })
+        : [];
+    const spAvgMap = new Map(
+      spRows.map((r) => [r.id, Number(r.averageCost)]),
+    );
+    const stillNeedBatch = storeIds.filter(
+      (id) => (spAvgMap.get(id) ?? 0) <= 0,
+    );
+    const costMap = await this.tbAvgUnitCostByStoreProduct(stillNeedBatch);
     let sum = 0;
     for (const it of items) {
-      sum += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+      const uc =
+        it.costPrice != null && Number(it.costPrice) > 0
+          ? Number(it.costPrice)
+          : (spAvgMap.get(it.storeProductId) ?? 0) > 0
+            ? (spAvgMap.get(it.storeProductId) ?? 0)
+            : (costMap.get(it.storeProductId) ?? 0);
+      sum += it.quantity * uc;
     }
     return sum;
   }
@@ -813,14 +814,46 @@ export class FinanceService {
   ): Promise<number> {
     const items = await this.prisma.saleReturnItem.findMany({
       where: { saleReturn: saleReturnWhere },
-      select: { storeProductId: true, quantity: true },
+      select: {
+        storeProductId: true,
+        quantity: true,
+        saleItemId: true,
+        saleItem: { select: { costPrice: true } },
+      },
     });
     if (items.length === 0) return 0;
-    const storeIds = [...new Set(items.map((i) => i.storeProductId))];
-    const costMap = await this.tbAvgUnitCostByStoreProduct(storeIds);
+    const needFallback = items.filter(
+      (i) =>
+        !i.saleItem ||
+        i.saleItem.costPrice == null ||
+        Number(i.saleItem.costPrice) <= 0,
+    );
+    const storeIds = [...new Set(needFallback.map((i) => i.storeProductId))];
+    const spRows =
+      storeIds.length > 0
+        ? await this.prisma.storeProduct.findMany({
+            where: { id: { in: storeIds } },
+            select: { id: true, averageCost: true },
+          })
+        : [];
+    const spAvgMap = new Map(
+      spRows.map((r) => [r.id, Number(r.averageCost)]),
+    );
+    const stillNeedBatch = storeIds.filter(
+      (id) => (spAvgMap.get(id) ?? 0) <= 0,
+    );
+    const costMap = await this.tbAvgUnitCostByStoreProduct(stillNeedBatch);
     let sum = 0;
     for (const it of items) {
-      sum += it.quantity * (costMap.get(it.storeProductId) ?? 0);
+      const uc =
+        it.saleItem &&
+        it.saleItem.costPrice != null &&
+        Number(it.saleItem.costPrice) > 0
+          ? Number(it.saleItem.costPrice)
+          : (spAvgMap.get(it.storeProductId) ?? 0) > 0
+            ? (spAvgMap.get(it.storeProductId) ?? 0)
+            : (costMap.get(it.storeProductId) ?? 0);
+      sum += it.quantity * uc;
     }
     return sum;
   }
@@ -1267,29 +1300,27 @@ export class FinanceService {
   }
 
   async getProfitAndLoss(dateFrom?: string, dateTo?: string) {
-    const dateFilter: any = {};
+    const saleForPnl: Prisma.SaleWhereInput = {
+      status: { not: SaleStatus.RETURNED },
+    };
     if (dateFrom || dateTo) {
-      dateFilter.createdAt = {};
-      if (dateFrom) dateFilter.createdAt.gte = bdDayStartUtc(dateFrom);
-      if (dateTo) dateFilter.createdAt.lte = bdDayEndUtc(dateTo);
+      saleForPnl.createdAt = {};
+      if (dateFrom) saleForPnl.createdAt.gte = bdDayStartUtc(dateFrom);
+      if (dateTo) saleForPnl.createdAt.lte = bdDayEndUtc(dateTo);
     }
 
     // Revenue: sum of sales grandTotal
     const salesResult = await this.prisma.sale.aggregate({
-      where: { ...dateFilter, status: { not: 'RETURNED' } },
+      where: saleForPnl,
       _sum: { grandTotal: true },
     });
     const revenue = salesResult._sum.grandTotal ?? new Prisma.Decimal(0);
 
-    // COGS: sum of purchase items unitCost * quantity
-    const purchaseItems = await this.prisma.purchaseItem.findMany({
-      where: { purchase: dateFilter },
-      select: { unitCost: true, quantity: true },
-    });
-    let cogs = new Prisma.Decimal(0);
-    for (const item of purchaseItems) {
-      cogs = cogs.add(item.unitCost.mul(new Prisma.Decimal(item.quantity)));
-    }
+    /** Same as `/reports/profit-loss`: COGS from sold lines × batch-weighted unit cost (not purchases in period). */
+    const cogsDec = await this.reportCosting.cogsFromSoldItemsForSaleWhere(
+      saleForPnl,
+    );
+    const cogs = new Prisma.Decimal(cogsDec);
 
     const grossProfit = revenue.sub(cogs);
 

@@ -15,6 +15,11 @@ import { ProductTransactionQueryDto } from './dto/product-transaction-query.dto.
 import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import type { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
+import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
+import {
+  fifoConsumeBatchesForSaleLine,
+  imeiConsumeBatchesForSaleLine,
+} from '../common/sale-line-fifo-cost.js';
 import { Prisma } from '@prisma/client';
 
 @Injectable()
@@ -136,12 +141,54 @@ export class SaleService {
         });
       }
 
+      const spIds = [...new Set(dto.items.map((i) => i.storeProductId))];
+      const fbMap = await avgPurchaseUnitCostByStoreProductIds(tx, spIds);
+      const spRows = await tx.storeProduct.findMany({
+        where: { id: { in: spIds } },
+        select: { id: true, averageCost: true },
+      });
+      const spAvgMap = new Map(
+        spRows.map((r) => [r.id, new Prisma.Decimal(r.averageCost)]),
+      );
+
       for (const item of dto.items) {
         const itemDiscount = new Prisma.Decimal(item.discount ?? 0);
         const itemTotal = new Prisma.Decimal(item.unitPrice)
           .mul(item.quantity)
           .sub(itemDiscount)
           .toDecimalPlaces(2);
+
+        const fb = new Prisma.Decimal(fbMap.get(item.storeProductId) ?? 0);
+        const avgSnap =
+          spAvgMap.get(item.storeProductId) ?? new Prisma.Decimal(0);
+        /** Seller-admin: snapshot `variant.averageCost` at sale time — not FIFO $/unit. */
+        const snapUnit = avgSnap.greaterThan(0) ? avgSnap : fb;
+
+        const serials = (item.serialNumbers ?? [])
+          .map((s) => String(s).trim())
+          .filter(Boolean);
+
+        if (serials.length > 0 && serials.length !== item.quantity) {
+          throw new BadRequestException(
+            `Store product #${item.storeProductId}: expected ${item.quantity} serial(s), got ${serials.length}`,
+          );
+        }
+
+        if (serials.length > 0) {
+          await imeiConsumeBatchesForSaleLine(
+            tx,
+            serials,
+            item.storeProductId,
+            fb,
+          );
+        } else {
+          await fifoConsumeBatchesForSaleLine(
+            tx,
+            item.storeProductId,
+            item.quantity,
+            fb,
+          );
+        }
 
         const saleItem = await tx.saleItem.create({
           data: {
@@ -151,6 +198,7 @@ export class SaleService {
             unitPrice: item.unitPrice,
             discount: itemDiscount,
             total: itemTotal,
+            costPrice: snapUnit.toDecimalPlaces(6),
           },
         });
 
@@ -159,28 +207,9 @@ export class SaleService {
           data: { quantity: { decrement: item.quantity } },
         });
 
-        const batch = await tx.batch.findFirst({
-          where: {
-            storeProductId: item.storeProductId,
-            availableQty: { gt: 0 },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (batch) {
-          const deductQty = Math.min(batch.availableQty, item.quantity);
-          await tx.batch.update({
-            where: { id: batch.id },
-            data: {
-              availableQty: { decrement: deductQty },
-              soldQty: { increment: deductQty },
-            },
-          });
-        }
-
-        if (item.serialNumbers?.length) {
+        if (serials.length > 0) {
           await tx.serialNumber.updateMany({
-            where: { serial: { in: item.serialNumbers } },
+            where: { serial: { in: serials } },
             data: { status: 'SOLD', saleItemId: saleItem.id },
           });
         }
@@ -1274,26 +1303,17 @@ export class SaleService {
       }),
     ]);
 
-    const storeProductIds = [
-      ...new Set(items.map((i) => i.storeProductId)),
-    ] as number[];
-
-    const costAggs =
+    const needFb = items.filter(
+      (i) => !i.costPrice || Number(i.costPrice) <= 0,
+    );
+    const storeProductIds = [...new Set(needFb.map((i) => i.storeProductId))];
+    const costByStore =
       storeProductIds.length > 0
-        ? await this.prisma.batch.groupBy({
-            by: ['storeProductId'],
-            where: { storeProductId: { in: storeProductIds } },
-            _avg: { purchaseCost: true },
-          })
-        : [];
-
-    const costByStore = new Map<number, number>();
-    for (const row of costAggs) {
-      costByStore.set(
-        row.storeProductId,
-        Number(row._avg.purchaseCost ?? 0),
-      );
-    }
+        ? await avgPurchaseUnitCostByStoreProductIds(
+            this.prisma,
+            storeProductIds,
+          )
+        : new Map<number, number>();
 
     const saleIds = [...new Set(items.map((i) => i.saleId))];
     const salesForSum =
@@ -1326,7 +1346,12 @@ export class SaleService {
       const qty = row.quantity;
       const unitPrice = Number(row.unitPrice);
       const lineSub = Number(row.total);
-      const costPrice = costByStore.get(sp.id) ?? 0;
+      const costPrice =
+        row.costPrice != null && Number(row.costPrice) > 0
+          ? Number(row.costPrice)
+          : Number(sp.averageCost) > 0
+            ? Number(sp.averageCost)
+            : (costByStore.get(sp.id) ?? 0);
       const costLine = qty * costPrice;
 
       const sumLines = lineSumBySale.get(sale.id) ?? new Prisma.Decimal(0);
@@ -1395,17 +1420,59 @@ export class SaleService {
     };
   }
 
-  async searchBySerial(serial: string) {
-    const serialNumber = await this.prisma.serialNumber.findUnique({
+  private extractPurchaseInvoiceFromNote(
+    note: string | null | undefined,
+  ): string | null {
+    if (!note?.trim()) return null;
+    const m = note.match(/Invoice:\s*([^\n]+)/i);
+    return m?.[1]?.trim() ?? null;
+  }
+
+  /** Purchase rows are created in the same transaction as batches; correlate by time window. */
+  private async findPurchaseNearBatch(
+    batchCreatedAt: Date,
+    branchId: number,
+    storeProductId: number,
+  ) {
+    const windowMs = 5 * 60 * 1000;
+    const from = new Date(batchCreatedAt.getTime() - windowMs);
+    const to = new Date(batchCreatedAt.getTime() + windowMs);
+    return this.prisma.purchase.findFirst({
+      where: {
+        branchId,
+        createdAt: { gte: from, lte: to },
+        items: { some: { storeProductId } },
+      },
+      orderBy: { id: 'desc' },
+      include: { supplier: true },
+    });
+  }
+
+  /**
+   * Seller-admin style: `{ serialNumber, matchCount, matches[] }` with product/branch/batch,
+   * inferred purchase, sale history (current SOLD link), and return history (when persisted).
+   */
+  async searchBySerial(serialParam: string) {
+    const serial = serialParam?.trim();
+    if (!serial) {
+      throw new BadRequestException('Serial / IMEI is required');
+    }
+
+    const row = await this.prisma.serialNumber.findUnique({
       where: { serial },
       include: {
         batch: {
           include: {
             storeProduct: {
               include: {
-                product: {
+                product: true,
+                productVariant: {
                   include: {
-                    images: { take: 1, orderBy: { sortOrder: 'asc' } },
+                    attributes: {
+                      include: {
+                        attributeValue: { include: { attribute: true } },
+                      },
+                    },
                   },
                 },
                 branch: true,
@@ -1415,12 +1482,150 @@ export class SaleService {
         },
         saleItem: {
           include: {
-            sale: { include: { customer: true } },
+            sale: { include: { customer: true, branch: true } },
           },
         },
       },
     });
-    if (!serialNumber) throw new NotFoundException('Serial number not found');
-    return serialNumber;
+
+    if (!row) {
+      throw new NotFoundException(`Serial number "${serial}" not found`);
+    }
+
+    const sp = row.batch.storeProduct;
+    const purchase = await this.findPurchaseNearBatch(
+      row.batch.createdAt,
+      sp.branchId,
+      sp.id,
+    );
+
+    const variant = sp.productVariant;
+    const attrs =
+      variant?.attributes?.map((a) => ({
+        attribute: { name: a.attributeValue.attribute.name },
+        attributeValue: { value: a.attributeValue.value },
+      })) ?? [];
+
+    const saleHistory: Array<{
+      id: string;
+      invoiceNo: string;
+      orderNo: string;
+      orderDate: string;
+      grandTotal: number;
+      paidAmount: number;
+      dueAmount: number;
+      orderStatus: string;
+      paymentStatus: string;
+      customer: { id: string; name: string; phone: string | null } | null;
+      customerName: string | null;
+      branch: { id: string; name: string } | null;
+      retailerId: null;
+      retailer: null;
+    }> = [];
+
+    if (row.status === 'SOLD' && row.saleItem?.sale) {
+      const s = row.saleItem.sale;
+      const due = Number(s.dueAmount);
+      saleHistory.push({
+        id: String(s.id),
+        invoiceNo: s.invoiceNumber,
+        orderNo: s.invoiceNumber,
+        orderDate: s.createdAt.toISOString(),
+        grandTotal: Number(s.grandTotal),
+        paidAmount: Number(s.paidAmount),
+        dueAmount: due,
+        orderStatus: s.status,
+        paymentStatus: due > 0.005 ? 'due' : 'paid',
+        customer: s.customer
+          ? {
+              id: String(s.customer.id),
+              name: s.customer.name,
+              phone: s.customer.phone ?? null,
+            }
+          : null,
+        customerName: s.customer?.name ?? null,
+        branch: s.branch
+          ? { id: String(s.branch.id), name: s.branch.name }
+          : null,
+        retailerId: null,
+        retailer: null,
+      });
+    }
+
+    const invoiceNoFromNote = purchase
+      ? this.extractPurchaseInvoiceFromNote(purchase.note)
+      : null;
+
+    const productType =
+      sp.product.type === 'VARIABLE' ? 'variable' : 'simple';
+
+    const match = {
+      id: String(row.id),
+      serialNumber: row.serial,
+      status: row.status.toLowerCase(),
+      soldAt:
+        row.status === 'SOLD' && row.saleItem
+          ? row.saleItem.sale.createdAt.toISOString()
+          : null,
+      purchaseId: purchase ? String(purchase.id) : null,
+      branchId: String(sp.branchId),
+      productId: String(sp.productId),
+      variantId:
+        sp.productVariantId != null ? String(sp.productVariantId) : null,
+      batchId: String(row.batch.id),
+      product: {
+        id: String(sp.productId),
+        name: sp.product.name,
+        productType,
+      },
+      variant: {
+        id: variant ? String(variant.id) : String(sp.productId),
+        sku: variant?.sku ?? sp.product.sku ?? '—',
+        attributes: attrs,
+      },
+      purchase: purchase
+        ? {
+            id: String(purchase.id),
+            billNo: purchase.referenceNo,
+            invoiceNo: invoiceNoFromNote,
+            purchaseDate: purchase.createdAt.toISOString(),
+            supplier: purchase.supplier
+              ? {
+                  id: String(purchase.supplier.id),
+                  name: purchase.supplier.name,
+                  companyName: purchase.supplier.company ?? null,
+                  phone: purchase.supplier.phone ?? null,
+                }
+              : undefined,
+          }
+        : null,
+      branch: { id: String(sp.branch.id), name: sp.branch.name },
+      batch: {
+        id: String(row.batch.id),
+        batchNumber: row.batch.batchNumber,
+        batchDate: row.batch.batchDate.toISOString(),
+        /** POS IMEI scan: resolve store listing from serial search. */
+        storeProduct: {
+          id: sp.id,
+          productId: sp.productId,
+        },
+      },
+      sellingPrice: Number(sp.sellingPrice),
+      saleHistory,
+      returnHistory: [] as Array<{
+        id: string;
+        returnNo: string;
+        returnDate: string;
+        invoiceNo: string | null;
+        branchName: string | null;
+        createdAt: string;
+      }>,
+    };
+
+    return {
+      serialNumber: row.serial,
+      matchCount: 1,
+      matches: [match],
+    };
   }
 }
