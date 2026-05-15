@@ -8,6 +8,7 @@ import {
   ArrayMinSize,
   Min,
   IsIn,
+  IsEnum,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -72,6 +73,16 @@ export class CreateSaleReturnDto {
   @IsOptional()
   @IsString()
   responsiblePerson?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  refundAmount?: number;
+
+  @IsOptional()
+  @IsEnum(['full', 'partial'])
+  refundType?: 'full' | 'partial';
 
   @IsArray()
   @ArrayMinSize(1)

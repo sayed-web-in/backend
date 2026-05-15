@@ -14,7 +14,7 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
-import { PatchSaleReturnRefundDto } from './dto/patch-sale-return-refund.dto.js';
+import { UpdateSaleReturnDto } from './dto/update-sale-return.dto.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
@@ -52,13 +52,13 @@ export class SaleController {
     return this.saleService.findReturnOne(returnId);
   }
 
-  /** Record cash refund from a finance account (seller-admin “Complete” modal). */
+  /** Complete return and/or record cash refund (seller-admin update). */
   @Patch('returns/:returnId')
-  patchReturnCashRefund(
+  updateSaleReturn(
     @Param('returnId', ParseIntPipe) returnId: number,
-    @Body() dto: PatchSaleReturnRefundDto,
+    @Body() dto: UpdateSaleReturnDto,
   ) {
-    return this.saleService.recordReturnCashRefund(returnId, dto);
+    return this.saleService.updateSaleReturn(returnId, dto);
   }
 
   @Get('pay-later/stats')

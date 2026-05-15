@@ -9,13 +9,15 @@ import { CreateSaleDto } from './dto/create-sale.dto.js';
 import { CompletePaylaterDto } from './dto/complete-paylater.dto.js';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto.js';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto.js';
-import { PatchSaleReturnRefundDto } from './dto/patch-sale-return-refund.dto.js';
+import { UpdateSaleReturnDto } from './dto/update-sale-return.dto.js';
+import { returnCogsForLines } from '../common/sale-return-seller.js';
 import { SaleQueryDto } from './dto/sale-query.dto.js';
 import { ProductTransactionQueryDto } from './dto/product-transaction-query.dto.js';
 import type { PayLaterQueryDto } from './dto/pay-later-query.dto.js';
 import type { SaleReturnQueryDto } from './dto/sale-return-query.dto.js';
 import { PaginationDto, paginate } from '../common/pagination.dto.js';
 import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
+import { postPosServiceIncomeIfNeeded } from '../common/pos-service-income.js';
 import {
   fifoConsumeBatchesForSaleLine,
   imeiConsumeBatchesForSaleLine,
@@ -215,6 +217,8 @@ export class SaleService {
         }
       }
 
+      let serviceIncomeAccountId: number | null = dto.paymentAccountId ?? null;
+
       if (effectiveStatus === 'COMPLETED') {
         /** Net cash/bank leg credited to accounts (seller-style): overpay/change is not deposited. */
         const moneyCreditCap = paidAmount.sub(advanceDec).greaterThan(0)
@@ -230,6 +234,39 @@ export class SaleService {
               .filter((p) => Number.isFinite(p.accountId) && p.accountId > 0 && p.amount > 0)
           : [];
 
+        if (moneyCreditCap.greaterThan(0.009)) {
+          const hasSplitPayments = providedPayments.length > 0;
+          const hasLegacySingleAccount =
+            dto.paymentAccountId != null &&
+            Number.isFinite(Number(dto.paymentAccountId)) &&
+            Number(dto.paymentAccountId) > 0 &&
+            totalCashGross.greaterThan(0);
+
+          if (!hasSplitPayments && !hasLegacySingleAccount) {
+            throw new BadRequestException(
+              'A payment account is required when receiving cash or bank payment on a completed sale.',
+            );
+          }
+
+          const accountIdsToCheck = hasSplitPayments
+            ? providedPayments.map((p) => p.accountId)
+            : [Number(dto.paymentAccountId)];
+
+          for (const accountId of accountIdsToCheck) {
+            const account = await tx.account.findUnique({
+              where: { id: accountId },
+            });
+            if (!account) {
+              throw new NotFoundException(`Payment account #${accountId} not found`);
+            }
+            if (!account.isActive) {
+              throw new BadRequestException(
+                `Payment account "${account.name}" is inactive`,
+              );
+            }
+          }
+        }
+
         if (providedPayments.length > 0) {
           let rawSumDec = new Prisma.Decimal(0);
           for (const p of providedPayments) {
@@ -240,6 +277,7 @@ export class SaleService {
             const totalToCredit = rawSumDec.lessThan(moneyCreditCap)
               ? rawSumDec
               : moneyCreditCap;
+            serviceIncomeAccountId = providedPayments[0]?.accountId ?? null;
 
             if (totalToCredit.greaterThan(0)) {
               let credited = new Prisma.Decimal(0);
@@ -296,6 +334,23 @@ export class SaleService {
               data: { balance: { increment: creditAmt } },
             });
           }
+        }
+
+        if (servicesTotal.greaterThan(0)) {
+          const cust =
+            dto.customerId != null
+              ? await tx.customer.findUnique({
+                  where: { id: dto.customerId },
+                  select: { name: true },
+                })
+              : null;
+          await postPosServiceIncomeIfNeeded(tx, {
+            servicesTotal,
+            branchId: dto.branchId,
+            invoiceNumber,
+            customerName: cust?.name ?? null,
+            paymentAccountId: serviceIncomeAccountId,
+          });
         }
       }
 
@@ -368,6 +423,24 @@ export class SaleService {
         await tx.account.update({
           where: { id: dto.paymentAccountId },
           data: { balance: { increment: netReceived } },
+        });
+      }
+
+      const svcTotal = new Prisma.Decimal(sale.servicesTotal ?? 0);
+      if (svcTotal.greaterThan(0)) {
+        const cust =
+          sale.customerId != null
+            ? await tx.customer.findUnique({
+                where: { id: sale.customerId },
+                select: { name: true },
+              })
+            : null;
+        await postPosServiceIncomeIfNeeded(tx, {
+          servicesTotal: svcTotal,
+          branchId: sale.branchId,
+          invoiceNumber: sale.invoiceNumber,
+          customerName: cust?.name ?? null,
+          paymentAccountId: dto.paymentAccountId ?? null,
         });
       }
 
@@ -830,6 +903,147 @@ export class SaleService {
     return returned;
   }
 
+  private async generateReturnNo(): Promise<string> {
+    const count = await this.prisma.saleReturn.count();
+    const seq = (count + 1).toString().padStart(5, '0');
+    return `SR-${Date.now().toString().slice(-8)}-${seq}`;
+  }
+
+  private parseReturnDate(raw?: string): Date {
+    if (!raw?.trim()) return new Date();
+    const d = new Date(raw.trim());
+    return Number.isNaN(d.getTime()) ? new Date() : d;
+  }
+
+  private async restoreReturnStock(
+    tx: Prisma.TransactionClient,
+    prepared: Array<{
+      dto: CreateSaleReturnDto['items'][0];
+      saleItem: { id: number };
+    }>,
+  ): Promise<void> {
+    for (const p of prepared) {
+      const item = p.dto;
+      const saleItem = p.saleItem;
+      await tx.storeProduct.update({
+        where: { id: item.storeProductId },
+        data: { quantity: { increment: item.quantity } },
+      });
+      const batch = await tx.batch.findFirst({
+        where: { storeProductId: item.storeProductId },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (batch) {
+        const restoreQty = Math.min(batch.soldQty, item.quantity);
+        if (restoreQty > 0) {
+          await tx.batch.update({
+            where: { id: batch.id },
+            data: {
+              availableQty: { increment: restoreQty },
+              soldQty: { decrement: restoreQty },
+              returnQty: { increment: restoreQty },
+            },
+          });
+        }
+      }
+      const sns = item.serialNumbers?.map((s) => s?.trim()).filter(Boolean) ?? [];
+      for (const serial of sns) {
+        await tx.serialNumber.updateMany({
+          where: { serial, saleItemId: saleItem.id, status: 'SOLD' },
+          data: { status: 'RETURNED', saleItemId: null },
+        });
+      }
+    }
+  }
+
+  private async findRefundExpenseCategoryId(
+    tx: Prisma.TransactionClient,
+    branchId: number,
+  ): Promise<number> {
+    const cats = await tx.expenseCategory.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true },
+    });
+    const hit = cats.find(
+      (c) =>
+        c.name.toLowerCase().includes('refund') ||
+        c.name.toLowerCase().includes('return'),
+    );
+    if (hit) return hit.id;
+    if (cats[0]) return cats[0].id;
+    throw new BadRequestException(
+      'No expense category found — add a Refund/Return category in Finance',
+    );
+  }
+
+  private async findReturnGainIncomeCategoryId(
+    tx: Prisma.TransactionClient,
+    branchId: number,
+  ): Promise<number> {
+    const cats = await tx.incomeCategory.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true },
+    });
+    const hit = cats.find(
+      (c) =>
+        c.name.toLowerCase().includes('other') ||
+        c.name.toLowerCase().includes('return'),
+    );
+    if (hit) return hit.id;
+    if (cats[0]) return cats[0].id;
+    throw new BadRequestException(
+      'No income category found — add an Other/Return category in Finance',
+    );
+  }
+
+  private async postSaleReturnRefundExpense(
+    tx: Prisma.TransactionClient,
+    opts: {
+      branchId: number;
+      accountId: number;
+      amount: Prisma.Decimal;
+      returnNo: string;
+      returnId: number;
+    },
+  ): Promise<void> {
+    const acc = await tx.account.findUnique({ where: { id: opts.accountId } });
+    if (!acc) throw new NotFoundException('Account not found');
+    if (!acc.isActive) throw new BadRequestException('Account is not active');
+    const bal = new Prisma.Decimal(acc.balance);
+    if (opts.amount.sub(bal).greaterThan(0.01)) {
+      throw new BadRequestException('Insufficient account balance');
+    }
+    const categoryId = await this.findRefundExpenseCategoryId(tx, opts.branchId);
+    const label = `Sale Return Refund - ${opts.returnNo}`;
+    const expense = await tx.expense.create({
+      data: {
+        branchId: opts.branchId,
+        categoryId,
+        accountId: opts.accountId,
+        name: label,
+        reference: opts.returnNo,
+        status: 'active',
+        amount: opts.amount,
+        note: `Refund for sale return #${opts.returnId}`,
+        date: new Date(),
+      },
+    });
+    await tx.transaction.create({
+      data: {
+        accountId: opts.accountId,
+        type: 'DEBIT',
+        amount: opts.amount,
+        reference: opts.returnNo,
+        description: label,
+      },
+    });
+    await tx.account.update({
+      where: { id: opts.accountId },
+      data: { balance: { decrement: opts.amount } },
+    });
+    void expense;
+  }
+
   async createReturn(dto: CreateSaleReturnDto) {
     const sale = await this.prisma.sale.findUnique({
       where: { id: dto.saleId },
@@ -960,130 +1174,275 @@ export class SaleService {
         damageDeductionValue: p.dmgVal,
       }));
 
-      const refund = refundTotal;
-      const due = new Prisma.Decimal(sale.dueAmount ?? 0);
-      const adv = new Prisma.Decimal(sale.advanceApplied ?? 0);
-      const grand = new Prisma.Decimal(sale.grandTotal ?? 0);
-
-      let dueReduction = new Prisma.Decimal(0);
-      let advanceRefund = new Prisma.Decimal(0);
-      let cashRefund = new Prisma.Decimal(0);
-      if (refund.greaterThan(0)) {
-        dueReduction = Prisma.Decimal.min(refund, due);
-        const afterDue = refund.sub(dueReduction);
-        if (grand.greaterThan(0) && adv.greaterThan(0)) {
-          const prop = adv.mul(refund).div(grand);
-          advanceRefund = Prisma.Decimal.min(afterDue, prop);
-        }
-        if (advanceRefund.sub(adv).greaterThan(0.02)) {
-          advanceRefund = adv;
-        }
-        cashRefund = afterDue.sub(advanceRefund);
+      const refundBase = refundTotal;
+      const refundType = dto.refundType ?? 'full';
+      let refundCap = refundBase;
+      if (refundType === 'partial' && dto.refundAmount != null) {
+        refundCap = Prisma.Decimal.min(
+          new Prisma.Decimal(dto.refundAmount),
+          refundBase,
+        );
+      }
+      if (refundCap.sub(refundBase).greaterThan(0.02)) {
+        throw new BadRequestException(
+          'Refund amount cannot exceed (total − damage deduction)',
+        );
       }
 
-      const needsCashPayout = cashRefund.greaterThan(0.005);
+      const returnNo = await this.generateReturnNo();
       const saleReturn = await tx.saleReturn.create({
         data: {
           saleId: dto.saleId,
+          returnNo,
+          returnDate: this.parseReturnDate(dto.returnDate),
           reason: reasonStored ?? dto.reason ?? null,
           totalAmount: returnGross,
-          refundAmount: refundTotal,
-          returnGain: gainTotal,
-          status: needsCashPayout ? 'pending' : 'completed',
-          pendingCashRefund: cashRefund,
+          totalDamageAmount: gainTotal,
+          refundAmount: refundCap,
+          refundType,
+          returnGain: new Prisma.Decimal(0),
+          status: 'pending',
+          pendingCashRefund: new Prisma.Decimal(0),
           cashRefundPaid: new Prisma.Decimal(0),
           items: { create: returnItemsCreate },
         },
         include: { items: true },
       });
 
-      for (const p of prepared) {
-        const item = p.dto;
-        const saleItem = p.saleItem;
-
-        await tx.storeProduct.update({
-          where: { id: item.storeProductId },
-          data: { quantity: { increment: item.quantity } },
-        });
-
-        const batch = await tx.batch.findFirst({
-          where: { storeProductId: item.storeProductId },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (batch) {
-          const restoreQty = Math.min(batch.soldQty, item.quantity);
-          if (restoreQty > 0) {
-            await tx.batch.update({
-              where: { id: batch.id },
-              data: {
-                availableQty: { increment: restoreQty },
-                soldQty: { decrement: restoreQty },
-                returnQty: { increment: restoreQty },
-              },
-            });
-          }
-        }
-
-        const sns = item.serialNumbers?.map((s) => s?.trim()).filter(Boolean) ?? [];
-        if (sns.length > 0) {
-          for (const serial of sns) {
-            await tx.serialNumber.updateMany({
-              where: {
-                serial,
-                saleItemId: saleItem.id,
-                status: 'SOLD',
-              },
-              data: { status: 'RETURNED', saleItemId: null },
-            });
-          }
-        }
-      }
-
-      const newReturnRows = prepared.map((p) => ({
-        saleItemId: p.saleItem.id,
-        storeProductId: p.dto.storeProductId,
-        quantity: p.dto.quantity,
-      }));
-
-      const allSold = sale.items.every((si) => {
-        const returned = this.priorReturnedForSaleLine(
-          saleItems,
-          [...priorRows, ...newReturnRows],
-          si,
-        );
-        return returned >= si.quantity;
-      });
-
-      await tx.sale.update({
-        where: { id: dto.saleId },
-        data: { status: allSold ? 'RETURNED' : 'PARTIAL_RETURN' },
-      });
-
-      if (refund.greaterThan(0)) {
-        const saleMoneyPatch: Prisma.SaleUpdateInput = {};
-        if (dueReduction.greaterThan(0)) {
-          saleMoneyPatch.dueAmount = { decrement: dueReduction };
-        }
-        if (advanceRefund.greaterThan(0)) {
-          saleMoneyPatch.advanceApplied = { decrement: advanceRefund };
-        }
-        if (Object.keys(saleMoneyPatch).length > 0) {
-          await tx.sale.update({
-            where: { id: dto.saleId },
-            data: saleMoneyPatch,
-          });
-        }
-        if (advanceRefund.greaterThan(0) && sale.customerId) {
-          await tx.customer.update({
-            where: { id: sale.customerId },
-            data: { totalAdvance: { increment: advanceRefund } },
-          });
-        }
-      }
-
       return saleReturn;
     });
+  }
+
+  async updateSaleReturn(returnId: number, dto: UpdateSaleReturnDto) {
+    if (dto.status === 'cancelled') {
+      throw new BadRequestException('Cancel return is not supported yet');
+    }
+    if (
+      dto.status !== 'completed' &&
+      (dto.paymentAmount != null || dto.refundAmount != null)
+    ) {
+      const row = await this.prisma.saleReturn.findUnique({
+        where: { id: returnId },
+        select: { status: true },
+      });
+      if (row?.status === 'pending') {
+        throw new BadRequestException(
+          'Set status to completed to restore stock and post refunds (seller-admin).',
+        );
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const ret = await tx.saleReturn.findUnique({
+        where: { id: returnId },
+        include: {
+          items: { include: { saleItem: { select: { costPrice: true } } } },
+          sale: { include: { items: true } },
+        },
+      });
+      if (!ret) throw new NotFoundException('Sale return not found');
+      if (ret.status === 'cancelled') {
+        throw new BadRequestException('This return is cancelled');
+      }
+
+      const returnNo = ret.returnNo ?? `SR-${ret.id}`;
+      const refundCapDec = new Prisma.Decimal(ret.refundAmount ?? 0);
+      const refundCap = Number(refundCapDec);
+      const statusChangingToCompleted =
+        ret.status === 'pending' && dto.status === 'completed';
+
+      let pendingCash = new Prisma.Decimal(ret.pendingCashRefund ?? 0);
+      let cashPaid = new Prisma.Decimal(ret.cashRefundPaid ?? 0);
+
+      if (statusChangingToCompleted) {
+        const preparedForStock = ret.items.map((it) => {
+          const saleItem = ret.sale.items.find((si) => si.id === it.saleItemId);
+          if (!saleItem) {
+            throw new BadRequestException(
+              `Sale line #${it.saleItemId} not found for return`,
+            );
+          }
+          return {
+            dto: {
+              storeProductId: it.storeProductId,
+              quantity: it.quantity,
+              unitPrice: Number(it.unitPrice),
+              serialNumbers: [] as string[],
+            },
+            saleItem,
+          };
+        });
+        await this.restoreReturnStock(tx, preparedForStock);
+
+        const priorRows = await tx.saleReturnItem.findMany({
+          where: {
+            saleReturn: { saleId: ret.saleId },
+            NOT: { saleReturnId: returnId },
+          },
+          select: { saleItemId: true, storeProductId: true, quantity: true },
+        });
+        const saleItems = ret.sale.items.map((i) => ({
+          id: i.id,
+          storeProductId: i.storeProductId,
+          quantity: i.quantity,
+        }));
+        const newReturnRows = ret.items.map((it) => ({
+          saleItemId: it.saleItemId,
+          storeProductId: it.storeProductId,
+          quantity: it.quantity,
+        }));
+        const allSold = ret.sale.items.every((si) => {
+          const returned = this.priorReturnedForSaleLine(
+            saleItems,
+            [...priorRows, ...newReturnRows],
+            si,
+          );
+          return returned >= si.quantity;
+        });
+        await tx.sale.update({
+          where: { id: ret.saleId },
+          data: { status: allSold ? 'RETURNED' : 'PARTIAL_RETURN' },
+        });
+
+        const saleRow = await tx.sale.findUnique({ where: { id: ret.saleId } });
+        if (!saleRow) throw new NotFoundException('Sale not found');
+        const due = new Prisma.Decimal(saleRow.dueAmount ?? 0);
+        const adv = new Prisma.Decimal(saleRow.advanceApplied ?? 0);
+        const grand = new Prisma.Decimal(saleRow.grandTotal ?? 0);
+        const refund = refundCapDec;
+
+        let dueReduction = new Prisma.Decimal(0);
+        let advanceRefund = new Prisma.Decimal(0);
+        if (refund.greaterThan(0)) {
+          dueReduction = Prisma.Decimal.min(refund, due);
+          const afterDue = refund.sub(dueReduction);
+          if (grand.greaterThan(0) && adv.greaterThan(0)) {
+            const prop = adv.mul(refund).div(grand);
+            advanceRefund = Prisma.Decimal.min(afterDue, prop);
+          }
+          if (advanceRefund.sub(adv).greaterThan(0.02)) {
+            advanceRefund = adv;
+          }
+          const cashOwed = afterDue.sub(advanceRefund);
+          pendingCash = cashOwed.greaterThan(0) ? cashOwed : new Prisma.Decimal(0);
+
+          const saleMoneyPatch: Prisma.SaleUpdateInput = {};
+          if (dueReduction.greaterThan(0)) {
+            saleMoneyPatch.dueAmount = { decrement: dueReduction };
+          }
+          if (advanceRefund.greaterThan(0)) {
+            saleMoneyPatch.advanceApplied = { decrement: advanceRefund };
+          }
+          if (Object.keys(saleMoneyPatch).length > 0) {
+            await tx.sale.update({
+              where: { id: ret.saleId },
+              data: saleMoneyPatch,
+            });
+          }
+          if (advanceRefund.greaterThan(0) && saleRow.customerId) {
+            await tx.customer.update({
+              where: { id: saleRow.customerId },
+              data: { totalAdvance: { increment: advanceRefund } },
+            });
+          }
+        }
+
+        const returnCogs = await returnCogsForLines(
+          this.prisma,
+          ret.items.map((it) => ({
+            quantity: it.quantity,
+            storeProductId: it.storeProductId,
+            saleItemId: it.saleItemId,
+            saleItem: it.saleItem,
+          })),
+        );
+        const returnGainAmt = Math.max(
+          0,
+          Math.round((returnCogs - refundCap) * 100) / 100,
+        );
+        if (returnGainAmt > 0.005) {
+          const incomeCatId = await this.findReturnGainIncomeCategoryId(
+            tx,
+            ret.sale.branchId,
+          );
+          let gainAccountId = dto.refundAccountId;
+          if (!gainAccountId) {
+            const fallback = await tx.account.findFirst({
+              where: { isActive: true },
+              orderBy: { id: 'asc' },
+              select: { id: true },
+            });
+            gainAccountId = fallback?.id;
+          }
+          if (gainAccountId) {
+            await tx.income.create({
+              data: {
+                branchId: ret.sale.branchId,
+                categoryId: incomeCatId,
+                accountId: gainAccountId,
+                name: `Sale Return Gain - ${returnNo}`,
+                amount: new Prisma.Decimal(returnGainAmt),
+                reference: returnNo,
+                status: 'active',
+                note: `Return gain: inventory ${returnCogs} − refund ${refundCap}`,
+                date: new Date(),
+              },
+            });
+          }
+        }
+        await tx.saleReturn.update({
+          where: { id: returnId },
+          data: { returnGain: new Prisma.Decimal(returnGainAmt) },
+        });
+      }
+
+      const cashOwed = Number(pendingCash);
+      const paidSoFar = Number(cashPaid);
+      const remainingCash = Math.max(0, cashOwed - paidSoFar);
+      let refundPaidNow = 0;
+      if (dto.paymentAmount != null && dto.paymentAmount > 0) {
+        refundPaidNow = Math.min(dto.paymentAmount, remainingCash);
+      } else if (dto.refundAmount != null) {
+        refundPaidNow = Math.max(
+          0,
+          Math.min(dto.refundAmount, cashOwed) - paidSoFar,
+        );
+      }
+      refundPaidNow = Math.round(refundPaidNow * 100) / 100;
+
+      if (refundPaidNow > 0.005) {
+        if (!dto.refundAccountId) {
+          throw new BadRequestException(
+            'refundAccountId is required to post a cash refund',
+          );
+        }
+        await this.postSaleReturnRefundExpense(tx, {
+          branchId: ret.sale.branchId,
+          accountId: dto.refundAccountId,
+          amount: new Prisma.Decimal(refundPaidNow),
+          returnNo,
+          returnId,
+        });
+        cashPaid = cashPaid.add(new Prisma.Decimal(refundPaidNow));
+      }
+
+      const newStatus =
+        statusChangingToCompleted || ret.status === 'completed'
+          ? 'completed'
+          : ret.status;
+
+      await tx.saleReturn.update({
+        where: { id: returnId },
+        data: {
+          status: newStatus,
+          pendingCashRefund: pendingCash,
+          cashRefundPaid: cashPaid,
+          refundAccountId: dto.refundAccountId ?? ret.refundAccountId,
+        },
+      });
+    });
+
+    return this.findReturnOne(returnId);
   }
 
   async findReturnOne(returnId: number) {
@@ -1126,49 +1485,73 @@ export class SaleService {
     }));
 
     const gross = Number(ret.totalAmount);
+    const damage = Number(ret.totalDamageAmount ?? 0);
     const refund = Number(ret.refundAmount);
-    const gain = Number(ret.returnGain);
+    let gain = Number(ret.returnGain);
     const pendingCap = Number(ret.pendingCashRefund ?? 0);
     const cashPaid = Number(ret.cashRefundPaid ?? 0);
     const remainingCash = Math.max(0, Math.round((pendingCap - cashPaid) * 100) / 100);
-    const status = ret.status ?? 'completed';
+    const status = ret.status ?? 'pending';
+    const completed = status === 'completed';
+
+    const itemsWithCost = await this.prisma.saleReturnItem.findMany({
+      where: { saleReturnId: returnId },
+      select: {
+        quantity: true,
+        storeProductId: true,
+        saleItemId: true,
+        saleItem: { select: { costPrice: true } },
+      },
+    });
+    const returnCogs = await returnCogsForLines(this.prisma, itemsWithCost);
+    const computedGain = Math.max(
+      0,
+      Math.round((returnCogs - refund) * 100) / 100,
+    );
+    if (!completed || gain <= 0) {
+      gain = computedGain;
+    }
 
     const accounting = {
       grossReturnValue: gross,
+      damageDeduction: damage,
       refundToCustomer: refund,
       returnGainRetained: gain,
       status,
       pendingCashRefund: pendingCap,
       cashRefundPaid: cashPaid,
       remainingCashRefund: remainingCash,
-      stockRestored: true,
-      customerAdvanceCredited: refund > 0 && ret.sale.customerId != null,
-      /** True once any cash refund payment was posted from a finance account. */
+      stockRestored: completed,
+      customerAdvanceCredited: completed && refund > 0 && ret.sale.customerId != null,
       accountDebited: cashPaid > 0.005,
       paymentAccountName: ret.sale.paymentAccount?.name ?? null,
       refundAccountName: ret.refundAccount?.name ?? null,
-      steps: [
+      steps: [] as string[],
+    };
+    if (!completed) {
+      accounting.steps.push(
+        'Return is pending (seller-admin): stock and customer due/advance adjustments run when you complete the return.',
+        `Net refund cap: ${refund.toFixed(2)} (gross ${gross.toFixed(2)} − damage ${damage.toFixed(2)}).`,
+      );
+    } else {
+      accounting.steps.push(
         'Store quantity was increased for each returned SKU.',
         'Latest batch sold quantity was reduced where possible.',
         'Sale status set to RETURNED or PARTIAL_RETURN when every invoice line is fully returned.',
-      ] as string[],
-    };
-    if (gain > 0) {
-      accounting.steps.push(
-        `Return gain (damage retention): ${gain.toFixed(2)} — shown under Profit & Loss → Return gain.`,
+        'Sale due was reduced first, then customer advance wallet was credited where applicable.',
       );
-    }
-    if (refund > 0) {
-      accounting.steps.push(
-        'Customer refund allocation at return time: sale due was reduced first, then customer advance wallet was credited proportionally (same rule as before).',
-      );
+      if (gain > 0) {
+        accounting.steps.push(
+          `Return gain (COGS − refund): ${gain.toFixed(2)} — posted as Income and in P&L return gain.`,
+        );
+      }
       if (pendingCap > 0.005) {
         accounting.steps.push(
-          `Cash/bank leg (${pendingCap.toFixed(2)}): recorded as pending — pay out from a finance account on this page (seller-admin style). Paid so far: ${cashPaid.toFixed(2)}; remaining: ${remainingCash.toFixed(2)}.`,
+          `Cash refund owed: ${pendingCap.toFixed(2)}. Paid: ${cashPaid.toFixed(2)}; remaining: ${remainingCash.toFixed(2)} (Sale Return Refund expense).`,
         );
-      } else {
+      } else if (refund > 0) {
         accounting.steps.push(
-          'No separate cash payout was required (refund was fully absorbed by due and advance).',
+          'No cash payout required — refund fully absorbed by due and advance.',
         );
       }
     }
@@ -1180,80 +1563,20 @@ export class SaleService {
     };
   }
 
+  /** @deprecated Use updateSaleReturn — kept for older admin clients. */
   async recordReturnCashRefund(
     returnId: number,
-    dto: PatchSaleReturnRefundDto,
+    dto: { paymentAmount: number; refundAccountId: number },
   ) {
-    const amount = new Prisma.Decimal(dto.paymentAmount);
-    if (amount.lessThanOrEqualTo(0)) {
-      throw new BadRequestException('paymentAmount must be greater than 0');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      const ret = await tx.saleReturn.findUnique({
-        where: { id: returnId },
-        include: { sale: { select: { id: true, invoiceNumber: true } } },
-      });
-      if (!ret) throw new NotFoundException('Sale return not found');
-      if (ret.status === 'cancelled') {
-        throw new BadRequestException('This return is cancelled');
-      }
-
-      const pendingCap = new Prisma.Decimal(ret.pendingCashRefund ?? 0);
-      const paidSoFar = new Prisma.Decimal(ret.cashRefundPaid ?? 0);
-      const remaining = pendingCap.sub(paidSoFar);
-
-      if (remaining.lessThanOrEqualTo(0.005)) {
-        throw new BadRequestException(
-          'No cash refund is pending for this return',
-        );
-      }
-      if (amount.sub(remaining).greaterThan(0.01)) {
-        throw new BadRequestException(
-          `Payment cannot exceed remaining ${remaining.toFixed(2)}`,
-        );
-      }
-
-      const acc = await tx.account.findUnique({
-        where: { id: dto.refundAccountId },
-      });
-      if (!acc) throw new NotFoundException('Account not found');
-      if (!acc.isActive) {
-        throw new BadRequestException('Account is not active');
-      }
-      const bal = new Prisma.Decimal(acc.balance);
-      if (amount.sub(bal).greaterThan(0.01)) {
-        throw new BadRequestException('Insufficient account balance');
-      }
-
-      await tx.transaction.create({
-        data: {
-          accountId: dto.refundAccountId,
-          type: 'DEBIT',
-          amount,
-          reference: ret.sale.invoiceNumber,
-          description: `Sale return #${ret.id} cash refund — ${ret.sale.invoiceNumber}`,
-        },
-      });
-      await tx.account.update({
-        where: { id: dto.refundAccountId },
-        data: { balance: { decrement: amount } },
-      });
-
-      const newPaid = paidSoFar.add(amount);
-      const done = newPaid.add(new Prisma.Decimal(0.01)).greaterThanOrEqualTo(pendingCap);
-
-      await tx.saleReturn.update({
-        where: { id: returnId },
-        data: {
-          cashRefundPaid: newPaid,
-          refundAccountId: dto.refundAccountId,
-          status: done ? 'completed' : 'pending',
-        },
-      });
+    const ret = await this.prisma.saleReturn.findUnique({
+      where: { id: returnId },
+      select: { status: true },
     });
-
-    return this.findReturnOne(returnId);
+    return this.updateSaleReturn(returnId, {
+      status: ret?.status === 'pending' ? 'completed' : undefined,
+      paymentAmount: dto.paymentAmount,
+      refundAccountId: dto.refundAccountId,
+    });
   }
 
   async getProductTransactions(query: ProductTransactionQueryDto) {

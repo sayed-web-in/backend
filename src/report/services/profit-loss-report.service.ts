@@ -7,6 +7,15 @@ import {
   dateRange,
   previousPeriodRange,
 } from '../helpers/report-query.utils.js';
+import {
+  legacyPosServiceIncomeGap,
+  sellerStyleExpenseWhere,
+  sellerStylePnlRevenue,
+} from '../../common/seller-style-pnl.js';
+import {
+  completedSaleReturnWhere,
+  sellerStyleReturnGainTotal,
+} from '../../common/sale-return-seller.js';
 import { ReportCostingService } from '../report-costing.service.js';
 
 @Injectable()
@@ -124,14 +133,15 @@ export class ProfitLossReportService {
         status: { not: SaleStatus.RETURNED },
       };
       const dateInMonth = { gte, lte };
-      const saleReturnWhere: Prisma.SaleReturnWhereInput = {
-        createdAt: dateInMonth,
-        ...(branchId != null && Number.isFinite(branchId)
-          ? { sale: { branchId: Math.floor(branchId) } }
-          : {}),
-      };
+      const saleReturnWhere: Prisma.SaleReturnWhereInput =
+        completedSaleReturnWhere({
+          createdAt: dateInMonth,
+          ...(branchId != null && Number.isFinite(branchId)
+            ? { sale: { branchId: Math.floor(branchId) } }
+            : {}),
+        });
 
-      const [posSaleAgg, ecomSaleAgg, saleReturnRefundAgg, saleReturnGainAgg] =
+      const [posSaleAgg, ecomSaleAgg, saleReturnRefundAgg, monthReturnGain] =
         await Promise.all([
           this.prisma.sale.aggregate({
             where: { ...saleWhere, orderId: null },
@@ -145,30 +155,27 @@ export class ProfitLossReportService {
             where: saleReturnWhere,
             _sum: { refundAmount: true },
           }),
-          this.prisma.saleReturn.aggregate({
-            where: saleReturnWhere,
-            _sum: { returnGain: true },
-          }),
+          sellerStyleReturnGainTotal(this.prisma, saleReturnWhere),
         ]);
 
       let salSum = 0;
       let otherExpSum = 0;
+      const monthExpenseBase = sellerStyleExpenseWhere({
+        date: dateInMonth,
+        ...expenseBranchWhere,
+      });
       if (salaryCatIds.length) {
         const [a, b] = await Promise.all([
           this.prisma.expense.aggregate({
             where: {
-              date: dateInMonth,
-              status: 'active',
-              ...expenseBranchWhere,
+              ...monthExpenseBase,
               categoryId: { in: salaryCatIds },
             },
             _sum: { amount: true },
           }),
           this.prisma.expense.aggregate({
             where: {
-              date: dateInMonth,
-              status: 'active',
-              ...expenseBranchWhere,
+              ...monthExpenseBase,
               categoryId: { notIn: salaryCatIds },
             },
             _sum: { amount: true },
@@ -178,11 +185,7 @@ export class ProfitLossReportService {
         otherExpSum = Number(b._sum.amount ?? 0);
       } else {
         const allExp = await this.prisma.expense.aggregate({
-          where: {
-            date: dateInMonth,
-            status: 'active',
-            ...expenseBranchWhere,
-          },
+          where: monthExpenseBase,
           _sum: { amount: true },
         });
         otherExpSum = Number(allExp._sum.amount ?? 0);
@@ -231,25 +234,26 @@ export class ProfitLossReportService {
       const ecomSvc = Number(ecomSaleAgg._sum?.servicesTotal ?? 0);
       posSales[m] = posGrand - posSvc;
       ecommerceSales[m] = ecomGrand - ecomSvc;
-      const saleSvcMonth = posSvc + ecomSvc;
       wholesaleSales[m] = 0;
       quickSellSales[m] = 0;
-      totalSales[m] =
-        posSales[m] + ecommerceSales[m] + wholesaleSales[m] + quickSellSales[m];
-      serviceIncome[m] = svcInc + saleSvcMonth;
+      const legacySvc = await legacyPosServiceIncomeGap(this.prisma, saleWhere);
+      serviceIncome[m] = svcInc + legacySvc;
       othersIncome[m] = othInc;
-      returnGain[m] = Number(saleReturnGainAgg._sum?.returnGain ?? 0);
+      salesReturn[m] = Number(saleReturnRefundAgg._sum?.refundAmount ?? 0);
+      totalSales[m] =
+        posSales[m] +
+        ecommerceSales[m] +
+        wholesaleSales[m] +
+        quickSellSales[m] -
+        salesReturn[m];
+      returnGain[m] = monthReturnGain;
       totalIncome[m] =
         totalSales[m] + serviceIncome[m] + othersIncome[m] + returnGain[m];
       cogs[m] = cogsMonthly[m];
-      salesReturn[m] = Number(saleReturnRefundAgg._sum?.refundAmount ?? 0);
       salaryWages[m] = salSum;
       otherOperatingExpenses[m] = otherExpSum;
       totalExpense[m] =
-        cogs[m] +
-        salesReturn[m] +
-        salaryWages[m] +
-        otherOperatingExpenses[m];
+        cogs[m] + salaryWages[m] + otherOperatingExpenses[m];
       grossProfit[m] = totalIncome[m] - cogs[m];
       netProfit[m] = totalIncome[m] - totalExpense[m];
     }
@@ -307,28 +311,31 @@ export class ProfitLossReportService {
       status: { not: SaleStatus.RETURNED },
     };
 
-    const [salesAgg, expenseAgg, incomeAgg, cogs] = await Promise.all([
-      this.prisma.sale.aggregate({
-        where: saleForPnlWhere,
-        _sum: { grandTotal: true, discount: true, tax: true },
+    const saleReturnWhere: Prisma.SaleReturnWhereInput = completedSaleReturnWhere({
+      ...dateWhere,
+      ...(query.branchId
+        ? { sale: { branchId: Math.floor(Number(query.branchId)) } }
+        : {}),
+    });
+
+    const [pnlRevenue, legacyServiceGap, expenseAgg, cogs] = await Promise.all([
+      sellerStylePnlRevenue(this.prisma, {
+        saleWhere: saleForPnlWhere,
+        incomeWhere: incomePnlWhere,
+        saleReturnWhere,
       }),
+      legacyPosServiceIncomeGap(this.prisma, saleForPnlWhere),
       this.prisma.expense.aggregate({
-        where: expensePnlWhere,
-        _sum: { amount: true },
-      }),
-      this.prisma.income.aggregate({
-        where: incomePnlWhere,
+        where: sellerStyleExpenseWhere(expensePnlWhere),
         _sum: { amount: true },
       }),
       this.costing.cogsFromSoldItemsForSaleWhere(saleForPnlWhere),
     ]);
 
-    const revenue = Number(salesAgg._sum.grandTotal ?? 0);
+    const revenue = pnlRevenue.totalRevenue + legacyServiceGap;
     const grossProfit = revenue - cogs;
     const operatingExpenses = Number(expenseAgg._sum.amount ?? 0);
-    const otherIncome = Number(incomeAgg._sum.amount ?? 0);
-    const operatingIncome = grossProfit - operatingExpenses + otherIncome;
-    const netProfit = operatingIncome;
+    const netProfit = grossProfit - operatingExpenses;
 
     type PreviousPeriodSummary = {
       revenue: number;
@@ -341,51 +348,52 @@ export class ProfitLossReportService {
     let previousPeriod: PreviousPeriodSummary | null = null;
     const prevRange = previousPeriodRange(query);
     if (prevRange) {
-      const [prevSales, prevExpenses, prevIncomes, prevCogs] =
-        await Promise.all([
-          this.prisma.sale.aggregate({
-            where: {
-              createdAt: prevRange,
-              ...branchFilter,
-              status: { not: SaleStatus.RETURNED },
-            },
-            _sum: { grandTotal: true },
-          }),
-          this.prisma.expense.aggregate({
-            where: {
-              date: prevRange,
-              status: 'active',
-              ...(query.branchId ? { branchId: query.branchId } : {}),
-            },
-            _sum: { amount: true },
-          }),
-          this.prisma.income.aggregate({
-            where: {
-              date: prevRange,
-              status: 'active',
-              ...(query.branchId ? { branchId: query.branchId } : {}),
-            },
-            _sum: { amount: true },
-          }),
-          this.costing.cogsFromSoldItemsForSaleWhere({
-            createdAt: prevRange,
-            ...branchFilter,
-            status: { not: SaleStatus.RETURNED },
-          }),
-        ]);
+      const prevSaleWhere: Prisma.SaleWhereInput = {
+        createdAt: prevRange,
+        ...branchFilter,
+        status: { not: SaleStatus.RETURNED },
+      };
+      const prevIncomeWhere: Prisma.IncomeWhereInput = {
+        date: prevRange,
+        status: 'active',
+        ...(query.branchId ? { branchId: query.branchId } : {}),
+      };
+      const prevReturnWhere: Prisma.SaleReturnWhereInput =
+        completedSaleReturnWhere({
+          createdAt: prevRange,
+          ...(query.branchId
+            ? { sale: { branchId: Math.floor(Number(query.branchId)) } }
+            : {}),
+        });
 
-      const prevRevenue = Number(prevSales._sum.grandTotal ?? 0);
+      const [prevPnl, prevLegacySvc, prevExpenses, prevCogs] = await Promise.all([
+        sellerStylePnlRevenue(this.prisma, {
+          saleWhere: prevSaleWhere,
+          incomeWhere: prevIncomeWhere,
+          saleReturnWhere: prevReturnWhere,
+        }),
+        legacyPosServiceIncomeGap(this.prisma, prevSaleWhere),
+        this.prisma.expense.aggregate({
+          where: sellerStyleExpenseWhere({
+            date: prevRange,
+            ...(query.branchId ? { branchId: query.branchId } : {}),
+          }),
+          _sum: { amount: true },
+        }),
+        this.costing.cogsFromSoldItemsForSaleWhere(prevSaleWhere),
+      ]);
+
+      const prevRevenue = prevPnl.totalRevenue + prevLegacySvc;
       const prevGross = prevRevenue - prevCogs;
       const prevOpExp = Number(prevExpenses._sum.amount ?? 0);
-      const prevOtherInc = Number(prevIncomes._sum.amount ?? 0);
-      const prevNetProfit = prevGross - prevOpExp + prevOtherInc;
+      const prevNetProfit = prevGross - prevOpExp;
 
       previousPeriod = {
         revenue: prevRevenue,
         cogs: prevCogs,
         grossProfit: prevGross,
         operatingExpenses: prevOpExp,
-        otherIncome: prevOtherInc,
+        otherIncome: prevPnl.otherIncome + prevPnl.serviceIncome,
         netProfit: prevNetProfit,
       };
     }
@@ -398,8 +406,8 @@ export class ProfitLossReportService {
         cogs,
         grossProfit,
         operatingExpenses,
-        otherIncome,
-        operatingIncome,
+        otherIncome: pnlRevenue.otherIncome + pnlRevenue.serviceIncome,
+        operatingIncome: netProfit,
         netProfit,
       },
       previousPeriod: prevSummary,

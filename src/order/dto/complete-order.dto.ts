@@ -27,9 +27,9 @@ export class CompleteOrderDto {
   @IsString()
   paymentMethod?: string;
 
-  @IsOptional()
+  /** Required — order sell-out must credit a cash/bank/mobile account (same as POS). */
   @IsInt()
-  paymentAccountId?: number;
+  paymentAccountId: number;
 
   /** Required for order lines whose product has IMEI tracking. */
   @IsOptional()

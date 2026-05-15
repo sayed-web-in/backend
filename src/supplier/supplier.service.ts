@@ -144,9 +144,60 @@ export class SupplierService {
     return this.prisma.supplier.update({ where: { id }, data: dto });
   }
 
-  async remove(id: number) {
+  /**
+   * Seller-admin: block delete when balances, opening-stock ledger, or any
+   * purchase/batch/transaction links exist — keeps accounting history intact.
+   */
+  private async assertSupplierCanDelete(id: number) {
     const supplier = await this.prisma.supplier.findUnique({ where: { id } });
     if (!supplier) throw new NotFoundException('Supplier not found');
+
+    const advance = new Prisma.Decimal(supplier.advanceBalance);
+    const due = new Prisma.Decimal(supplier.totalDue);
+    if (advance.greaterThan(0.009) || due.greaterThan(0.009)) {
+      throw new BadRequestException(
+        'Cannot delete: this supplier has advance balance or outstanding due. Clear balances before deleting.',
+      );
+    }
+
+    const [openingStockTx, purchaseCount, batchCount, transactionCount] =
+      await Promise.all([
+        this.prisma.supplierTransaction.count({
+          where: { supplierId: id, offsetsOpeningInventory: true },
+        }),
+        this.prisma.purchase.count({ where: { supplierId: id } }),
+        this.prisma.batch.count({ where: { supplierId: id } }),
+        this.prisma.supplierTransaction.count({ where: { supplierId: id } }),
+      ]);
+
+    if (openingStockTx > 0) {
+      throw new BadRequestException(
+        'Cannot delete: this supplier has opening-stock-funded due history required for trial balance. Deactivate the supplier instead.',
+      );
+    }
+
+    const links: string[] = [];
+    if (purchaseCount > 0) {
+      links.push(`${purchaseCount} purchase${purchaseCount === 1 ? '' : 's'}`);
+    }
+    if (batchCount > 0) {
+      links.push(`${batchCount} stock batch${batchCount === 1 ? '' : 'es'}`);
+    }
+    if (transactionCount > 0) {
+      links.push(
+        `${transactionCount} ledger transaction${transactionCount === 1 ? '' : 's'}`,
+      );
+    }
+
+    if (links.length > 0) {
+      throw new BadRequestException(
+        `Cannot delete: this supplier is linked to ${links.join(', ')}. Deactivate the supplier instead to preserve accounting records.`,
+      );
+    }
+  }
+
+  async remove(id: number) {
+    await this.assertSupplierCanDelete(id);
     return this.prisma.supplier.delete({ where: { id } });
   }
 

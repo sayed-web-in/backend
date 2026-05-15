@@ -21,6 +21,13 @@ import {
   yearMonthKeyBd,
 } from '../common/bd-time.js';
 import { avgPurchaseUnitCostByStoreProductIds } from '../common/avg-purchase-unit-cost.js';
+import {
+  legacyPosServiceIncomeGap,
+  sellerStyleExpenseWhere,
+  sellerStylePnlRevenue,
+  sellerStyleSupplierPayable,
+} from '../common/seller-style-pnl.js';
+import { completedSaleReturnWhere } from '../common/sale-return-seller.js';
 import { ReportCostingService } from '../report/report-costing.service.js';
 
 @Injectable()
@@ -813,7 +820,7 @@ export class FinanceService {
     saleReturnWhere: Prisma.SaleReturnWhereInput,
   ): Promise<number> {
     const items = await this.prisma.saleReturnItem.findMany({
-      where: { saleReturn: saleReturnWhere },
+      where: { saleReturn: completedSaleReturnWhere(saleReturnWhere) },
       select: {
         storeProductId: true,
         quantity: true,
@@ -863,6 +870,8 @@ export class FinanceService {
    * Cash/bank/mobile accounts are organisation-wide (no branch on Account). Branch filters
    * sales due, inventory (batches), and branch-scoped P&amp;L (strict branch on income/expense).
    * Lifetime COGS uses sold items (same as profit report), minus return lines.
+   * Inventory asset uses storeProduct WAC × qty (seller-admin variant.averageCost × stockQuantity),
+   * not FIFO batch layers — so COGS snapshots and inventory stay on the same cost basis.
    */
   async getTrialBalance(branchId?: number) {
     const bid =
@@ -889,13 +898,10 @@ export class FinanceService {
       liquidAccounts,
       salesDueAgg,
       manualDueAgg,
-      supplierDueAgg,
       supplierAdvanceAgg,
       customerAdvanceAgg,
-      batches,
-      salesRevAgg,
-      incomeAgg,
-      saleReturnAgg,
+      initialBatches,
+      storeProductsForInventory,
       expenseAgg,
       openingCapitalAgg,
     ] = await Promise.all([
@@ -915,39 +921,24 @@ export class FinanceService {
       }),
       this.prisma.supplier.aggregate({
         where: { isActive: true },
-        _sum: { totalDue: true },
-      }),
-      this.prisma.supplier.aggregate({
-        where: { isActive: true },
         _sum: { advanceBalance: true },
       }),
       this.prisma.customer.aggregate({
         _sum: { totalAdvance: true },
       }),
       this.prisma.batch.findMany({
-        where: { storeProduct: storeProductBranch },
-        select: {
-          batchType: true,
-          availableQty: true,
-          initialQty: true,
-          purchaseCost: true,
-          totalCost: true,
+        where: {
+          batchType: 'initial',
+          storeProduct: storeProductBranch,
         },
+        select: { totalCost: true },
       }),
-      this.prisma.sale.aggregate({
-        where: { status: { not: SaleStatus.RETURNED }, ...saleBranch },
-        _sum: { grandTotal: true },
-      }),
-      this.prisma.income.aggregate({
-        where: { status: 'active', ...incomeBranch },
-        _sum: { amount: true },
-      }),
-      this.prisma.saleReturn.aggregate({
-        where: saleReturnBranch,
-        _sum: { refundAmount: true, returnGain: true },
+      this.prisma.storeProduct.findMany({
+        where: storeProductBranch,
+        select: { quantity: true, averageCost: true },
       }),
       this.prisma.expense.aggregate({
-        where: { status: 'active', ...expenseBranch },
+        where: sellerStyleExpenseWhere(expenseBranch),
         _sum: { amount: true },
       }),
       this.prisma.account.aggregate({
@@ -956,23 +947,21 @@ export class FinanceService {
       }),
     ]);
 
+    /** Seller-admin: Σ (averageCost × stockQuantity) per branch listing. */
     let inventoryValue = 0;
+    for (const sp of storeProductsForInventory) {
+      const qty = Number(sp.quantity);
+      if (qty > 0) {
+        inventoryValue += qty * toNum(sp.averageCost);
+      }
+    }
     /**
      * Full at-cost opening stock ever added via initial batches (seller-style gross),
      * including batches already sold out — needed so supplier “opening stock” due offsets equity.
      */
     let openingInventoryCapitalGrossFull = 0;
-    for (const b of batches) {
-      const totalC = toNum(b.totalCost);
-      if (b.batchType === 'initial') {
-        openingInventoryCapitalGrossFull += totalC;
-      }
-      if (b.availableQty <= 0) continue;
-      const initial = b.initialQty;
-      const unitFromBatch =
-        initial > 0 ? totalC / initial : toNum(b.purchaseCost);
-      const line = b.availableQty * unitFromBatch;
-      inventoryValue += line;
+    for (const b of initialBatches) {
+      openingInventoryCapitalGrossFull += toNum(b.totalCost);
     }
 
     let supplierIdsForOiBranch: number[] | undefined;
@@ -1043,23 +1032,32 @@ export class FinanceService {
       status: { not: SaleStatus.RETURNED },
       ...saleBranch,
     };
-    const [cogsSold, returnCogs] = await Promise.all([
-      this.tbCogsFromSoldItems(saleForPnlWhere),
-      this.tbReturnCogs(saleReturnBranch),
-    ]);
+    const [cogsSold, returnCogs, pnlRevenue, legacyServiceGap, supplierPayable] =
+      await Promise.all([
+        this.tbCogsFromSoldItems(saleForPnlWhere),
+        this.tbReturnCogs(saleReturnBranch),
+        sellerStylePnlRevenue(this.prisma, {
+          saleWhere: saleForPnlWhere,
+          incomeWhere: incomeBranch,
+          saleReturnWhere: saleReturnBranch,
+        }),
+        legacyPosServiceIncomeGap(this.prisma, saleForPnlWhere),
+        sellerStyleSupplierPayable(this.prisma, bid),
+      ]);
     const cogsNet = Math.max(0, cogsSold - returnCogs);
 
-    const salesGrand = toNum(salesRevAgg._sum.grandTotal);
-    const incomeTotal = toNum(incomeAgg._sum.amount);
-    const refundTotal = toNum(saleReturnAgg._sum.refundAmount);
-    const returnGainTotal = toNum(saleReturnAgg._sum.returnGain);
     const operatingExpenses = toNum(expenseAgg._sum.amount);
-
+    const serviceIncomeTotal =
+      pnlRevenue.serviceIncome + legacyServiceGap;
     /**
-     * Lifetime net result (aligned with profit report): sale revenue + posted income
-     * − customer refunds + return gain − **COGS from sold qty** (minus return COGS) − operating expenses.
+     * Seller-admin: product sales (excl. POS service) + service/other income
+     * − refunds + return gain; legacy service gap for old sales without income rows.
      */
-    const totalRevenue = salesGrand + incomeTotal - refundTotal + returnGainTotal;
+    const totalRevenue =
+      pnlRevenue.productSales +
+      serviceIncomeTotal +
+      pnlRevenue.otherIncome -
+      pnlRevenue.refundTotal;
     const totalExpense = cogsNet + operatingExpenses;
     const cumulativeNetProfit = totalRevenue - totalExpense;
 
@@ -1070,7 +1068,6 @@ export class FinanceService {
     const customerReceivable = saleDue + manualDue;
 
     const supplierAdvanceReceivable = toNum(supplierAdvanceAgg._sum.advanceBalance);
-    const supplierPayable = toNum(supplierDueAgg._sum.totalDue);
     const customerAdvance = toNum(customerAdvanceAgg._sum.totalAdvance);
 
     const totalOpeningCapital = toNum(openingCapitalAgg._sum.openingBalance);
@@ -1303,42 +1300,47 @@ export class FinanceService {
     const saleForPnl: Prisma.SaleWhereInput = {
       status: { not: SaleStatus.RETURNED },
     };
+    const incomeWhere: Prisma.IncomeWhereInput = {};
+    const expenseWhere: Prisma.ExpenseWhereInput = {};
     if (dateFrom || dateTo) {
       saleForPnl.createdAt = {};
-      if (dateFrom) saleForPnl.createdAt.gte = bdDayStartUtc(dateFrom);
-      if (dateTo) saleForPnl.createdAt.lte = bdDayEndUtc(dateTo);
+      incomeWhere.date = {};
+      expenseWhere.date = {};
+      if (dateFrom) {
+        const gte = bdDayStartUtc(dateFrom);
+        saleForPnl.createdAt.gte = gte;
+        incomeWhere.date.gte = gte;
+        expenseWhere.date.gte = gte;
+      }
+      if (dateTo) {
+        const lte = bdDayEndUtc(dateTo);
+        saleForPnl.createdAt.lte = lte;
+        incomeWhere.date.lte = lte;
+        expenseWhere.date.lte = lte;
+      }
     }
 
-    // Revenue: sum of sales grandTotal
-    const salesResult = await this.prisma.sale.aggregate({
-      where: saleForPnl,
-      _sum: { grandTotal: true },
-    });
-    const revenue = salesResult._sum.grandTotal ?? new Prisma.Decimal(0);
+    const [pnlRevenue, legacyServiceGap, cogsDec, expenseResult] =
+      await Promise.all([
+        sellerStylePnlRevenue(this.prisma, {
+          saleWhere: saleForPnl,
+          incomeWhere,
+        }),
+        legacyPosServiceIncomeGap(this.prisma, saleForPnl),
+        this.reportCosting.cogsFromSoldItemsForSaleWhere(saleForPnl),
+        this.prisma.expense.aggregate({
+          where: sellerStyleExpenseWhere(expenseWhere),
+          _sum: { amount: true },
+        }),
+      ]);
 
-    /** Same as `/reports/profit-loss`: COGS from sold lines × batch-weighted unit cost (not purchases in period). */
-    const cogsDec = await this.reportCosting.cogsFromSoldItemsForSaleWhere(
-      saleForPnl,
+    const revenue = new Prisma.Decimal(
+      pnlRevenue.totalRevenue + legacyServiceGap,
     );
     const cogs = new Prisma.Decimal(cogsDec);
-
     const grossProfit = revenue.sub(cogs);
-
-    // Operating Expenses
-    const expenseDateFilter: any = { status: 'active' };
-    if (dateFrom || dateTo) {
-      expenseDateFilter.date = {};
-      if (dateFrom) expenseDateFilter.date.gte = bdDayStartUtc(dateFrom);
-      if (dateTo) expenseDateFilter.date.lte = bdDayEndUtc(dateTo);
-    }
-
-    const expenseResult = await this.prisma.expense.aggregate({
-      where: expenseDateFilter,
-      _sum: { amount: true },
-    });
     const operatingExpenses =
       expenseResult._sum.amount ?? new Prisma.Decimal(0);
-
     const netProfit = grossProfit.sub(operatingExpenses);
 
     return {

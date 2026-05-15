@@ -324,6 +324,22 @@ export class OrderService {
       throw new BadRequestException('Cannot complete a cancelled order');
     }
 
+    const paymentAccountId = Number(dto.paymentAccountId);
+    if (!Number.isFinite(paymentAccountId) || paymentAccountId < 1) {
+      throw new BadRequestException(
+        'A payment account is required to complete this order as a sale',
+      );
+    }
+    const paymentAccount = await this.prisma.account.findUnique({
+      where: { id: paymentAccountId },
+    });
+    if (!paymentAccount) {
+      throw new NotFoundException('Payment account not found');
+    }
+    if (!paymentAccount.isActive) {
+      throw new BadRequestException('Payment account is inactive');
+    }
+
     const imeiByOrderItemId = new Map<number, CompleteOrderImeiLineDto>();
     for (const line of dto.imeiLines ?? []) {
       imeiByOrderItemId.set(line.orderItemId, line);
@@ -376,7 +392,7 @@ export class OrderService {
           changeAmount: 0,
           dueAmount: 0,
           paymentMethod,
-          paymentAccountId: dto.paymentAccountId,
+          paymentAccountId: paymentAccountId,
           status: 'COMPLETED',
           orderId: order.id,
           note: `From order ${order.orderNumber}`,
@@ -483,22 +499,20 @@ export class OrderService {
         }
       }
 
-      if (dto.paymentAccountId) {
-        await tx.transaction.create({
-          data: {
-            accountId: dto.paymentAccountId,
-            type: 'CREDIT',
-            amount: grandTotal,
-            reference: invoiceNumber,
-            description: `Order completion - ${order.orderNumber}`,
-          },
-        });
+      await tx.transaction.create({
+        data: {
+          accountId: paymentAccountId,
+          type: 'CREDIT',
+          amount: grandTotal,
+          reference: invoiceNumber,
+          description: `Order completion - ${order.orderNumber}`,
+        },
+      });
 
-        await tx.account.update({
-          where: { id: dto.paymentAccountId },
-          data: { balance: { increment: grandTotal } },
-        });
-      }
+      await tx.account.update({
+        where: { id: paymentAccountId },
+        data: { balance: { increment: grandTotal } },
+      });
 
       await tx.orderTracking.create({
         data: {
