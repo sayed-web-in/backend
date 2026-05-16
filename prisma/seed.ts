@@ -112,6 +112,30 @@ async function main() {
   console.log(`Seeded admin user: ${user.email} (role: ${user.role})`);
   console.log(`Seeded categories: ${categories.length} (${createdCategoryCount} created, ${categories.length - createdCategoryCount} updated)`);
   console.log(`Seeded subcategories: ${createdSubCategoryCount + updatedSubCategoryCount} (${createdSubCategoryCount} created, ${updatedSubCategoryCount} updated)`);
+
+  const financeCategories = [
+    { model: 'incomeCategory' as const, name: 'Other' },
+    { model: 'expenseCategory' as const, name: 'Sale Return Refund' },
+  ];
+  for (const fc of financeCategories) {
+    const existing =
+      fc.model === 'incomeCategory'
+        ? await prisma.incomeCategory.findFirst({ where: { name: fc.name } })
+        : await prisma.expenseCategory.findFirst({ where: { name: fc.name } });
+    if (!existing) {
+      if (fc.model === 'incomeCategory') {
+        await prisma.incomeCategory.create({
+          data: { name: fc.name, isActive: true },
+        });
+      } else {
+        await prisma.expenseCategory.create({
+          data: { name: fc.name, isActive: true },
+        });
+      }
+    }
+  }
+  console.log('Seeded finance categories: Other (income), Sale Return Refund (expense)');
+
   console.log('Use these credentials to log in to the admin panel (set ADMIN_EMAIL / ADMIN_PASSWORD in .env to override defaults).');
 
   await seedStorefrontContent(prisma);

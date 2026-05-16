@@ -416,7 +416,7 @@ export class OrderService {
         const fb = new Prisma.Decimal(fbMap.get(item.storeProductId) ?? 0);
         const avgSnap =
           spAvgMap.get(item.storeProductId) ?? new Prisma.Decimal(0);
-        /** Match seller-admin: line COGS from branch listing WAC, not per-batch FIFO $. */
+        /** Seller-admin: snapshot moving WAC (`averageCost`) at sale time. */
         const snapUnit = avgSnap.greaterThan(0) ? avgSnap : fb;
 
         let imeiRows: Array<{ batchId: number }> | null = null;

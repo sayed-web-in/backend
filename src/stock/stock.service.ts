@@ -208,9 +208,9 @@ export class StockService {
           remaining -= deductQty;
         }
 
-        const unitMoved = new Prisma.Decimal(sourceProduct.averageCost).greaterThan(
-          0,
-        )
+        const unitMoved = new Prisma.Decimal(
+          sourceProduct.averageCost,
+        ).greaterThan(0)
           ? new Prisma.Decimal(sourceProduct.averageCost)
           : new Prisma.Decimal(latestCost);
 
@@ -268,6 +268,7 @@ export class StockService {
             storeProductId: destProduct.id,
           },
         });
+
       }
 
       return tx.stockTransfer.findUnique({

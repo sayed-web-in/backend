@@ -1,6 +1,7 @@
 import {
   Prisma,
   PurchaseStatus,
+  SaleStatus,
   SupplierTransactionType,
 } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service.js';
@@ -14,6 +15,27 @@ export type SellerStylePnlRevenue = {
   returnGainTotal: number;
   totalRevenue: number;
 };
+
+/**
+ * Seller-admin: invoice stays in product sales; completed returns only subtract `refundAmount`
+ * (do not drop the whole sale when status is RETURNED / PARTIAL_RETURN).
+ */
+export function sellerStyleSaleWhereForPnl(
+  extra: Prisma.SaleWhereInput = {},
+): Prisma.SaleWhereInput {
+  const { status: _ignored, ...rest } = extra;
+  return {
+    ...rest,
+    status: {
+      in: [
+        SaleStatus.COMPLETED,
+        SaleStatus.PAY_LATER,
+        SaleStatus.PARTIAL_RETURN,
+        SaleStatus.RETURNED,
+      ],
+    },
+  };
+}
 
 /** Operating expenses for TB / P&amp;L (excludes salary-advance refs and sale-return refund expenses). */
 export function sellerStyleExpenseWhere(
@@ -35,6 +57,28 @@ export function sellerStyleExpenseWhere(
   };
 }
 
+/** Auto-posted on return complete — counted via refund + return COGS, not manual other income. */
+export function isSaleReturnGainIncomeName(name: string | null | undefined): boolean {
+  return (name || '').toLowerCase().includes('sale return gain');
+}
+
+/** Seller TB / P&amp;L: exclude auto return-gain rows from manual income totals. */
+export function sellerStyleIncomeWhereForPnl(
+  extra: Prisma.IncomeWhereInput = {},
+): Prisma.IncomeWhereInput {
+  return {
+    AND: [
+      extra,
+      {
+        OR: [
+          { name: null },
+          { NOT: { name: { contains: 'Sale Return Gain' } } },
+        ],
+      },
+    ],
+  };
+}
+
 function splitIncomeRows(
   rows: Array<{
     amount: Prisma.Decimal;
@@ -45,6 +89,7 @@ function splitIncomeRows(
   let serviceIncome = 0;
   let otherIncome = 0;
   for (const inc of rows) {
+    if (isSaleReturnGainIncomeName(inc.name)) continue;
     const incName = (inc.name || '').toLowerCase();
     const cat = (inc.category?.name || '').toLowerCase();
     const amt = Number(inc.amount);
@@ -59,7 +104,8 @@ function splitIncomeRows(
 
 /**
  * Seller-admin trial balance / P&amp;L revenue:
- * product sales (grandTotal − servicesTotal) + service &amp; other income − refunds + return gain.
+ * product sales + service &amp; other income − refunds.
+ * Return gain is in net profit via return COGS (expense side) and refunds, not double-counted as income.
  */
 export async function sellerStylePnlRevenue(
   prisma: PrismaService,
@@ -69,10 +115,10 @@ export async function sellerStylePnlRevenue(
     saleReturnWhere?: Prisma.SaleReturnWhereInput;
   },
 ): Promise<SellerStylePnlRevenue> {
-  const incomeWhere: Prisma.IncomeWhereInput = {
+  const incomeWhere = sellerStyleIncomeWhereForPnl({
     status: 'active',
     ...opts.incomeWhere,
-  };
+  });
 
   const [salesAgg, incomes, returnAgg] = await Promise.all([
     prisma.sale.aggregate({
