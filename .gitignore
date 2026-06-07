@@ -2,10 +2,10 @@ node_modules
 dist
 coverage
 
-# Environment (never commit secrets)
-.env
+# Environment
 .env.local
 .env.*.local
+!.env
 
 # Uploaded files (repo keeps empty folder via .gitkeep only)
 uploads/*
