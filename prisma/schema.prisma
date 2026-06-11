@@ -350,7 +350,7 @@ enum SellingType {
 
 model Batch {
   id            Int            @id @default(autoincrement())
-  batchNumber   String         @unique
+  batchNumber   String
   barcode       String?        @unique
   batchType     String         @default("initial")
   initialQty    Int
@@ -368,6 +368,7 @@ model Batch {
   storeProduct  StoreProduct   @relation(fields: [storeProductId], references: [id], onDelete: Cascade)
   serialNumbers SerialNumber[]
 
+  @@unique([storeProductId, batchNumber])
   @@map("batches")
 }
 

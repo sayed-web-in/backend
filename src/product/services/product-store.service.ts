@@ -56,8 +56,7 @@ export class ProductStoreService {
         },
       });
 
-      /** Readable, unique id; includes INITIAL so add-product → add store listings are obvious in batch list. */
-      const batchNumber = `BATCH-INITIAL-SP${storeProduct.id}-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const batchNumber = 'INITIAL';
       const barcode = generateBarcode();
       const now = new Date();
 
