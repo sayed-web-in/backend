@@ -58,8 +58,13 @@ import { Prisma } from '@prisma/client';
     return `${prefix}-${ts}-${rand}`;
   }
 
+  export const MAX_BARCODE_LENGTH = 12;
+
+  /** Numeric code for batch barcode / label print (max 12 chars). */
   export function generateBarcode(): string {
-    const ts = Date.now();
-    const rand = Math.floor(1000 + Math.random() * 9000);
-    return `BAR-${ts}-${rand}`;
+    const ts = Date.now().toString().slice(-8);
+    const rand = Math.floor(Math.random() * 10000)
+      .toString()
+      .padStart(4, "0");
+    return `${ts}${rand}`.slice(0, MAX_BARCODE_LENGTH);
   }
