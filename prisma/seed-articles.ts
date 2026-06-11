@@ -11,7 +11,7 @@ type SeedArticle = {
 
 const articles: SeedArticle[] = [
   {
-    title: 'Authentic Mobile Phones, Laptops, Gadgets in Bangladesh',
+    title: 'Authentic Moobile Phones, Laptops, Gadgets in Bangladesh',
     content:
       '<p>Looking for real mobile phones, laptops, and gadgets in Bangladesh? Choose Future Technology for trusted tech products. We offer official and authentic devices with proper warranty support and transparent pricing.</p><p>From flagship smartphones to reliable student laptops, our catalog is curated for daily users, gamers, creators, and professionals. Buy online or visit our outlet for hands-on support.</p>',
     isActive: true,
