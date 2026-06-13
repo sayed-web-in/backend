@@ -114,6 +114,7 @@ export class ProductCatalogService {
       where.OR = [
         { name: { contains: search } },
         { sku: { contains: search } },
+        { variants: { some: { sku: { contains: search } } } },
       ];
     }
     if (categoryId) where.categoryId = categoryId;
@@ -177,7 +178,10 @@ export class ProductCatalogService {
             select: { image: true },
           },
           storeProducts: {
-            ...(useWebCatalog ? { where: webStoreProductWhere } : {}),
+            where: {
+              ...(useWebCatalog ? webStoreProductWhere : {}),
+              ...(branchId ? { branchId } : {}),
+            },
             include: {
               branch: true,
               productVariant: {
@@ -194,7 +198,7 @@ export class ProductCatalogService {
                 },
               },
             },
-            take: 5,
+            take: branchId ? 50 : 5,
           },
         },
       }),
