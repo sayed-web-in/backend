@@ -58,6 +58,11 @@ export class UpsertStorefrontSettingsDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(120)
+  proprietorName?: string;
+
+  @IsOptional()
+  @IsString()
   footerDescription?: string;
 
   @IsOptional()

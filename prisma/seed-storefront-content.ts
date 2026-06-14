@@ -68,6 +68,7 @@ export async function seedStorefrontContent(prisma: PrismaClient): Promise<void>
         mode: HeaderBrandMode.TEXT,
         brandName: BRAND_NAME,
         brandLogoUrl: '',
+        proprietorName: 'MD SYEDUL ISLAM',
         isActive: true,
       },
     });
@@ -78,6 +79,7 @@ export async function seedStorefrontContent(prisma: PrismaClient): Promise<void>
         mode: HeaderBrandMode.TEXT,
         brandName: BRAND_NAME,
         brandLogoUrl: '',
+        proprietorName: 'MD SYEDUL ISLAM',
         isActive: true,
       },
     });

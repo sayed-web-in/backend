@@ -102,6 +102,7 @@ export class SaleQueryService {
         returns: {
           include: { items: true },
         },
+        termsAndCondition: true,
       },
     });
     if (!sale) throw new NotFoundException('Sale not found');

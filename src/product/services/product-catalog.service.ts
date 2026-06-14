@@ -186,12 +186,16 @@ export class ProductCatalogService {
               branch: true,
               productVariant: {
                 select: {
+                  id: true,
                   sku: true,
                   image: true,
                   attributes: {
                     select: {
                       attributeValue: {
-                        select: { value: true },
+                        select: {
+                          value: true,
+                          attribute: { select: { name: true } },
+                        },
                       },
                     },
                   },

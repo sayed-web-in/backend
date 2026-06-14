@@ -68,3 +68,18 @@ import { Prisma } from '@prisma/client';
       .padStart(3, "0");
     return `${ts}${rand}`.slice(0, MAX_BARCODE_LENGTH);
   }
+
+  /** Unique batch barcode within the current transaction (retries on collision). */
+  export async function allocateUniqueBarcode(
+    tx: Prisma.TransactionClient,
+  ): Promise<string> {
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const candidate = generateBarcode();
+      const taken = await tx.batch.findFirst({
+        where: { barcode: candidate },
+        select: { id: true },
+      });
+      if (!taken) return candidate;
+    }
+    throw new Error('Failed to allocate a unique batch barcode');
+  }

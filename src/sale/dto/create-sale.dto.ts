@@ -103,6 +103,10 @@ export class CreateSaleDto {
   @IsEnum(SaleStatus)
   status?: SaleStatus;
 
+  @IsOptional()
+  @IsInt()
+  termsAndConditionId?: number;
+
   /** POS service add-ons (same as admin POS `appliedServices` total). Added to grandTotal. */
   @IsOptional()
   @Type(() => Number)

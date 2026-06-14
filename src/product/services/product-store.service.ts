@@ -273,6 +273,64 @@ export class ProductStoreService {
     return { variants };
   }
 
+  /** POS scan: exact batch barcode or batch number in branch (print-label codes). */
+  async findBatchByBarcodeForPos(code: string, branchId: number) {
+    const trimmed = String(code ?? '').trim();
+    if (!trimmed) {
+      throw new BadRequestException('Barcode / batch code is required');
+    }
+
+    const include = {
+      storeProduct: {
+        include: {
+          product: {
+            select: { id: true, name: true, hasImei: true, sku: true },
+          },
+        },
+      },
+    } as const;
+
+    const storeProductWhere = {
+      branchId,
+      isActive: true,
+    };
+
+    let batch = await this.prisma.batch.findFirst({
+      where: {
+        barcode: trimmed,
+        availableQty: { gt: 0 },
+        storeProduct: storeProductWhere,
+      },
+      include,
+    });
+
+    if (!batch) {
+      batch = await this.prisma.batch.findFirst({
+        where: {
+          batchNumber: trimmed,
+          availableQty: { gt: 0 },
+          storeProduct: storeProductWhere,
+        },
+        include,
+      });
+    }
+
+    if (!batch) {
+      throw new NotFoundException('No in-stock batch found for this code');
+    }
+
+    const sp = batch.storeProduct;
+    return {
+      storeProductId: sp.id,
+      productId: sp.productId,
+      productName: sp.product.name,
+      hasImei: sp.product.hasImei,
+      batchNumber: batch.batchNumber,
+      barcode: batch.barcode ?? '',
+      availableQty: batch.availableQty,
+    };
+  }
+
   async getBatchById(batchId: number) {
     const batch = await this.prisma.batch.findUnique({
       where: { id: batchId },

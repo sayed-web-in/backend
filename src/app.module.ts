@@ -25,6 +25,7 @@ import { FaqModule } from './faq/faq.module.js';
 import { ShortFeatureModule } from './short-feature/short-feature.module.js';
 import { StorefrontSettingsModule } from './storefront-settings/storefront-settings.module.js';
 import { StoreLocationModule } from './store-location/store-location.module.js';
+import { TermsAndConditionsModule } from './terms-and-conditions/terms-and-conditions.module.js';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { StoreLocationModule } from './store-location/store-location.module.js';
     ShortFeatureModule,
     StorefrontSettingsModule,
     StoreLocationModule,
+    TermsAndConditionsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

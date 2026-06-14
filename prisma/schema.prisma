@@ -466,6 +466,7 @@ model Sale {
   paymentAccountId Int?
   status          SaleStatus   @default(COMPLETED)
   note            String?      @db.Text
+  termsAndConditionId Int?
   orderId         Int?         @unique
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
@@ -473,6 +474,7 @@ model Sale {
   branch          Branch       @relation(fields: [branchId], references: [id])
   paymentAccount       Account?                @relation(fields: [paymentAccountId], references: [id])
   order                Order?                  @relation(fields: [orderId], references: [id])
+  termsAndCondition    TermsAndCondition?        @relation(fields: [termsAndConditionId], references: [id])
   items                SaleItem[]
   returns              SaleReturn[]
   customerTransactions CustomerTransaction[]
@@ -994,13 +996,14 @@ model TopBarLink {
 }
 
 model HeaderBrandConfig {
-  id          Int             @id @default(autoincrement())
-  mode        HeaderBrandMode @default(TEXT)
-  brandName   String          @default("")
-  brandLogoUrl String         @default("")
-  isActive    Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id             Int             @id @default(autoincrement())
+  mode           HeaderBrandMode @default(TEXT)
+  brandName      String          @default("")
+  brandLogoUrl   String          @default("")
+  proprietorName String          @default("")
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
   @@map("header_brand_configs")
 }
@@ -1046,6 +1049,18 @@ model StorefrontMarketingConfig {
   updatedAt    DateTime @updatedAt
 
   @@map("storefront_marketing_configs")
+}
+
+model TermsAndCondition {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String   @db.Text
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  sales       Sale[]
+
+  @@map("terms_and_conditions")
 }
 
 model StoreLocation {

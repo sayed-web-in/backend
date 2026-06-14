@@ -12,6 +12,7 @@ import { PriceListQueryDto } from './dto/price-list-query.dto.js';
 import { ProductCatalogService } from './services/product-catalog.service.js';
 import { ProductStoreService } from './services/product-store.service.js';
 import { ProductStorefrontService } from './services/product-storefront.service.js';
+import { MAX_BARCODE_LENGTH } from './helpers/product-catalog.util.js';
 
 /** Facade — keeps controller and module imports stable. */
 @Injectable()
@@ -58,6 +59,12 @@ export class ProductService {
   }
   getBatchById(batchId: number) {
     return this.storeSvc.getBatchById(batchId);
+  }
+  findBatchByBarcodeForPos(code: string, branchId: number) {
+    return this.storeSvc.findBatchByBarcodeForPos(code, branchId);
+  }
+  getLabelBarcodeConfig() {
+    return { maxLength: MAX_BARCODE_LENGTH, field: 'barcode' as const };
   }
   getStoreProducts(query: StoreProductQueryDto) {
     return this.storeSvc.getStoreProducts(query);

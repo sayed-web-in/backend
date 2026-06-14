@@ -10,6 +10,7 @@ import { StockQueryDto } from './dto/stock-query.dto.js';
 import { paginate } from '../common/pagination.dto.js';
 import { Prisma } from '@prisma/client';
 import { weightedAverageCostAfterPurchase } from '../common/store-product-wac.js';
+import { allocateUniqueBarcode } from '../product/helpers/product-catalog.util.js';
 
 @Injectable()
 export class StockService {
@@ -59,6 +60,7 @@ export class StockService {
           await tx.batch.create({
             data: {
               batchNumber: this.generateBatchNumber(),
+              barcode: await allocateUniqueBarcode(tx),
               batchType: 'adjustment-add',
               initialQty: item.quantity,
               availableQty: item.quantity,
@@ -260,6 +262,7 @@ export class StockService {
         await tx.batch.create({
           data: {
             batchNumber: this.generateBatchNumber(),
+            barcode: await allocateUniqueBarcode(tx),
             batchType: 'transfer',
             initialQty: item.quantity,
             availableQty: item.quantity,

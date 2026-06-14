@@ -120,6 +120,7 @@ export class StorefrontSettingsService {
           mode: dto.headerBrandMode ?? header.mode,
           brandName: dto.brandName ?? header.brandName,
           brandLogoUrl: dto.brandLogoUrl ?? header.brandLogoUrl,
+          proprietorName: dto.proprietorName ?? header.proprietorName,
         },
       });
 

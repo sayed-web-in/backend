@@ -11,6 +11,7 @@ import {
   generatePurchaseReferenceNo,
   generatePurchaseBatchNumber,
 } from '../helpers/purchase-query.filters.js';
+import { allocateUniqueBarcode } from '../../product/helpers/product-catalog.util.js';
 
 @Injectable()
 export class PurchaseCreateService {
@@ -173,6 +174,7 @@ export class PurchaseCreateService {
         const batch = await tx.batch.create({
           data: {
             batchNumber: generatePurchaseBatchNumber(),
+            barcode: await allocateUniqueBarcode(tx),
             batchType: 'purchase',
             initialQty: item.quantity,
             availableQty: item.quantity,

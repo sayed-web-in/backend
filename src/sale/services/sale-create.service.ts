@@ -51,6 +51,17 @@ export class SaleCreateService {
         );
       }
 
+      if (dto.termsAndConditionId != null) {
+        const terms = await tx.termsAndCondition.findFirst({
+          where: { id: dto.termsAndConditionId, isActive: true },
+        });
+        if (!terms) {
+          throw new BadRequestException(
+            'Selected terms & conditions not found or inactive',
+          );
+        }
+      }
+
       const totalCashGross =
         status === 'PAY_LATER'
           ? new Prisma.Decimal(0)
@@ -113,6 +124,7 @@ export class SaleCreateService {
           paymentAccountId: dto.paymentAccountId,
           status: effectiveStatus,
           note: saleNote,
+          termsAndConditionId: dto.termsAndConditionId ?? null,
         },
       });
 
@@ -348,6 +360,7 @@ export class SaleCreateService {
           customer: true,
           branch: true,
           paymentAccount: true,
+          termsAndCondition: true,
         },
       });
     });

@@ -81,6 +81,21 @@ export class ProductController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('label-barcode/config')
+  getLabelBarcodeConfig() {
+    return this.productService.getLabelBarcodeConfig();
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('batches/by-barcode')
+  findBatchByBarcode(
+    @Query('code') code: string,
+    @Query('branchId', ParseIntPipe) branchId: number,
+  ) {
+    return this.productService.findBatchByBarcodeForPos(code, branchId);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('batches/:batchId')
   getBatchById(@Param('batchId', ParseIntPipe) batchId: number) {
     return this.productService.getBatchById(batchId);
